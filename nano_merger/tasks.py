@@ -2,10 +2,10 @@
 
 import law
 
-from nano_merger.framework import Task
+from nano_merger.framework import DatasetTask
 
 
-class GatherFiles(Task):
+class GatherFiles(DatasetTask):
 
     def output(self):
         return self.local_target("files.json")
@@ -24,7 +24,7 @@ class GatherFiles(Task):
         self.output().dump(files, formatter="json")
 
 
-class ComputeMergingFactor(Task):
+class ComputeMergingFactor(DatasetTask):
 
     def requires(self):
         return GatherFiles.req(self)
@@ -36,5 +36,5 @@ class ComputeMergingFactor(Task):
         self.output().dump({"n": 15}, formatter="json")
 
 
-class MergeFiles(law.tasks.ForestMerge):
+class MergeFiles(DatasetTask, law.tasks.ForestMerge):
     pass
