@@ -67,3 +67,21 @@ class DatasetTask(ConfigTask):
 
     def store_parts(self):
         return super().store_parts() + (self.dataset,)
+
+
+class DatasetWrapperTask(ConfigTask, law.WrapperTask):
+
+    datasets = law.CSVParameter(
+        default=("*",),
+        description="comma-separated list of datasets to run; default: all",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # resolve datasets
+        datasets = []
+        for dataset in self.datasets_config:
+            if law.util.multi_match(dataset, self.datasets, mode=any):
+                datasets.append(dataset)
+        self.datasets = tuple(datasets)
