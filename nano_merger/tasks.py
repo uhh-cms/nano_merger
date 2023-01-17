@@ -8,21 +8,21 @@ from nano_merger.framework import DatasetTask
 class GatherFiles(DatasetTask):
 
     def output(self):
-        return self.local_target("files.json")
+        return self.remote_target("files.json")
 
     def run(self):
-
         files = find_child_files(
             config_global=self.global_config,
             dataset=self.dataset,
             config_dataset=self.dataset_config)
 
-        from IPython import embed
-        embed()
-        self.output().dump(files, formatter="json")
+        self.output().dump(files, indent=4, formatter="json")
 
 
 class ComputeMergingFactor(DatasetTask):
+
+    # TODO: make merged_size
+    # merged_size = law.BytesParameter(default=512.0, unit="MB")
 
     def requires(self):
         return GatherFiles.req(self)
@@ -35,34 +35,52 @@ class ComputeMergingFactor(DatasetTask):
         unit = "mb"
 
         merging_factor = calculate_mergin_factor(
-            files=self.requires().output().load(),
+            files=self.input().load(formatter="json"),
             target_size=target_size,
-            unit=unit)
+            unit=unit,
+        )
 
-        self.output().dump({"n": merging_factor}, formatter="json")
+        self.output().dump({"merging_factor": merging_factor}, indent=4, formatter="json")
 
 
 class MergeFiles(DatasetTask, law.tasks.ForestMerge):
-    merge_factor = 8
+    # TODO: execute on htcondor
+
+    merge_factor = 3
 
     def merge_workflow_requires(self):
-        req = self.dep_PrepareMLEvents.req(self, _exclude={"branches"})
+        return {
+            "files": GatherFiles.req(self),
+            "factor": ComputeMergingFactor.req(self),
+        }
 
-        # if the merging stats exist, allow the forest to be cached
-        self._cache_forest = req.merging_stats_exist
-
-        return req
+    def trace_merge_workflow_inputs(self, inputs):
+        return len(inputs["files"].load(formatter="json"))
 
     def merge_requires(self, start_leaf, end_leaf):
-        return [
-            self.dep_PrepareMLEvents.req(self, branch=i)
-            for i in range(start_leaf, end_leaf)
+        return {
+            "files": GatherFiles.req(self),
+            "factor": ComputeMergingFactor.req(self),
+        }
+
+    def trace_merge_inputs(self, inputs):
+        # get file info
+        files = inputs["files"].load(formatter="json")[slice(*self.leaf_range)]
+
+        # map to wlcg file targets
+        targets = [
+            law.wlcg.WLCGFileTarget(f["path"], fs=f"wlcg_fs_{f['remotebase']}")
+            for f in files
         ]
 
-    def merge_output(self):
+        return targets
 
-        k = self.ml_model_inst.folds
-        return self.target(f"mlevents_f{self.fold}of{k}.parquet")
+    def merge_output(self):
+        # TODO: define dynamic outputs once our inputs exist
+        return law.SiblingFileCollection([
+            self.local_target("merged_0.root"),
+            # self.local_target("merged_1.root"),
+        ])
 
     def merge(self, inputs, output):
         law.root.hadd_task(self, inputs, output)

@@ -75,7 +75,7 @@ class GetFiles:
         wlcg_dir = self.base_dir.child(child_file)
         size = wlcg_dir.stat().st_size
         path = wlcg_dir.path
-        return {"path": path, "size": size, "remotebase": self.remote_base}
+        return {"path": path, "size": size, "remote_base": self.remote_base}
 
     def collect_files_information(self):
         """Creates a list with dictionaries holding path, remotebase and file size of all Child files of self.base_dir
@@ -130,5 +130,4 @@ def calculate_mergin_factor(files, target_size=512, unit="mb", *, precision=3):
     num_files = len(files)
     size_files = convert_bytes(sum([file["size"] for file in files]), unit, precision)
     merging_factor = int(math.ceil(num_files / math.ceil(size_files / target_size)))
-    from IPython import embed; embed()
     return merging_factor

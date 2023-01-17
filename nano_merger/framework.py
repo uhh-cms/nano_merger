@@ -10,7 +10,7 @@ import luigi
 import law
 
 
-law.contrib.load("htcondor", "tasks", "wlcg")
+law.contrib.load("htcondor", "root", "tasks", "wlcg")
 
 
 class Task(law.Task):
