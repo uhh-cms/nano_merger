@@ -6,7 +6,7 @@ import uuid
 
 import law
 
-from nano_merger.framework import DatasetTask, DatasetWrapperTask
+from nano_merger.framework import DatasetTask, DatasetWrapperTask, HTCondorWorkflow
 from nano_merger.util import find_child_files, calculate_merging_factor
 
 
@@ -55,6 +55,8 @@ class ComputeMergingFactor(DatasetTask):
 
 class ComputeMergingFactorWrapper(DatasetWrapperTask):
 
+    target_size = ComputeMergingFactor.target_size
+
     def requires(self):
         return [
             ComputeMergingFactor.req(self, dataset=dataset)
@@ -62,8 +64,7 @@ class ComputeMergingFactorWrapper(DatasetWrapperTask):
         ]
 
 
-class MergeFiles(DatasetTask, law.tasks.ForestMerge):
-    # TODO: execute on htcondor
+class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
 
     target_size = ComputeMergingFactor.target_size
 
@@ -172,6 +173,8 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge):
 
 
 class MergeFilesWrapper(DatasetWrapperTask):
+
+    target_size = ComputeMergingFactor.target_size
 
     def requires(self):
         return [
