@@ -3,6 +3,7 @@
 import math
 import random
 import uuid
+import re
 
 import law
 
@@ -117,11 +118,13 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
         sim = "SIM" if is_mc else ""
         kind = "mc" if is_mc else "data"
         main_campaign, sub_campaign = campaign.split("-", 1)
+        # replace the "miniAOD" part in the main campaign
+        main_campaign = re.sub(r"MiniAODv\d+", f"NanoAODv{self.global_config['nanoVersion']}", main_campaign)
 
         return f"/store/{kind}/{main_campaign}/{full_dataset}/NANOAOD{sim}/{sub_campaign}/0/{_hash}.root"
 
     def store_parts(self):
-        return (f"merged_to_{self.target_size}MB",)
+        return (f"merged_{self.target_size}MB",)
 
     def merge_workflow_requires(self):
         return {
