@@ -1,5 +1,6 @@
 # coding: utf-8
 
+import os
 import math
 import random
 import uuid
@@ -8,7 +9,6 @@ import re
 import law
 
 from nano_merger.framework import DatasetTask, DatasetWrapperTask, HTCondorWorkflow
-from nano_merger.util import find_child_files, calculate_merging_factor
 
 
 class GatherFiles(DatasetTask):
@@ -17,12 +17,33 @@ class GatherFiles(DatasetTask):
         return self.remote_target("files.json")
 
     def run(self):
-        files = find_child_files(
-            config_global=self.global_config,
-            dataset=self.dataset,
-            config_dataset=self.dataset_config,
+        # define the base directory that is queried
+        remote_base = self.dataset_config["remoteBase"]
+        remote_dir = law.wlcg.WLCGDirectoryTarget(
+            os.path.join(self.dataset_config["miniAOD"].split("/")[1], f"crab_{self.dataset}"),
+            fs=f"wlcg_fs_{remote_base}",
         )
 
+        # loop through timestamps
+        assert self.dataset_config["timestamps"]
+        files = []
+        for timestamp in self.dataset_config["timestamps"]:
+            timestamp_dir = remote_dir.child(timestamp, type="d")
+
+            # loop through numbered directories
+            for num in timestamp_dir.listdir(pattern="0*", type="d"):
+                numbered_dir = timestamp_dir.child(num, type="d")
+
+                # loop through root files
+                for name in numbered_dir.listdir(pattern="*.root", type="f"):
+                    root_file = numbered_dir.child(name, type="f")
+                    files.append({
+                        "path": root_file.path,
+                        "size": root_file.stat().st_size,
+                        "remote_base": remote_base,
+                    })
+
+        # save the file info
         self.output().dump(files, indent=4, formatter="json")
 
 
@@ -41,11 +62,15 @@ class ComputeMergingFactor(DatasetTask):
         return self.remote_target(f"factor_{self.target_size}MB.json")
 
     def run(self):
+        # compute the merging factor
         files = self.input().load(formatter="json")
-        merging_factor = calculate_merging_factor(files=files, target_size_mb=self.target_size)
+        size_files = sum([file["size"] for file in files]) / (1024 ** 2)
+        merging_factor = int(math.ceil(len(files) / math.ceil(size_files / self.target_size)))
 
+        # save the file
         self.output().dump({"merging_factor": merging_factor}, indent=4, formatter="json")
 
+        # some useful logs
         self.publish_message(
             f"dataset {self.dataset}\n"
             f"  inputs : {len(files)}\n"
