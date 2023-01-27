@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Re-aligns and re-compresses root files for faster IO.
+
+Usage example:
+
+> repack_root_file -c LSTD=8 -s branch -o output.root input.root
+
+For more info, see https://indico.fnal.gov/event/15154/contributions/29507/attachments/18630/23379/pivarski-lz4-bulkio-studies.pdf .
+"""
+
+from pathlib import Path
+
+import ROOT
+
+ROOT.PyConfig.IgnoreCommandLineOptions = True
+ROOT.gROOT.SetBatch()
+
+COMPRESSION = {
+    lut.__name__[1:].lower(): {
+        k[len(pre) :]: getattr(lut, k)
+        for k in dir(lut)
+        if k.startswith(pre) and not k.endswith("Undefined")
+    }
+    for lut, pre in [
+        (ROOT.RCompressionSetting.EAlgorithm, "k"),
+        (ROOT.RCompressionSetting.EDefaults, "kUse"),
+    ]
+}
+IOFEATURES = {
+    name[1:]: getattr(source, name)
+    for source in [ROOT.Experimental.EIOFeatures, ROOT.EIOFeatures]
+    for name in dir(source)
+    if name.startswith("k") and name != "kSupported"
+}
+
+
+def repack(
+    output, input, fast=False, keep=False, sort="branch", compress="same", iofeatures=(), verbose=0
+):
+    if Path(output).exists():
+        raise RuntimeError("output files already esists %s" % output)
+    for i, inp in enumerate(input, start=1):
+        if not Path(inp).exists():
+            raise RuntimeError("input file (#%d) does not exists %s" % (i, inp))
+
+    fm = ROOT.TFileMerger(False, False)
+    fm.SetMsgPrefix(Path(__file__).stem)
+    fm.SetPrintLevel(verbose)
+
+    if compress.lower() == "same":
+        fi = ROOT.TFile(input[0])
+        comp = fi.GetCompressionSettings()
+        fi.Close()
+    else:
+        comp = compress.split("=", 1)
+        if len(comp) == 1:
+            comp.append("")
+        algo, lvl = comp
+        lut = COMPRESSION["algorithm" if lvl else "defaults"]
+        for key, comp in lut.items():
+            if key.lower() == algo.lower():
+                break
+        else:
+            raise NotImplementedError(f"{algo} not found among: {', '.join(lut.keys())}")
+        if lvl:
+            comp = ROOT.CompressionSettings(comp, int(lvl))
+
+    fm.SetFastMethod(bool(fast))
+    fm.SetMergeOptions(f"SortBasketsBy{sort.capitalize()}")
+    if iofeatures:
+        iof = ROOT.TIOFeatures()
+        for feat in iofeatures:
+            iof.Set(IOFEATURES.get(feat, feat))
+        fm.SetIOFeatures(iof)
+
+    fm.OutputFile(output, "CREATE", comp)
+    for inp in input:
+        fm.AddFile(inp)
+
+    MT = ROOT.TFileMerger.EPartialMergeType
+    mt = MT.kAll | MT.kRegular
+    if keep:
+        mt |= MT.kKeepCompression
+    fm.PartialMerge(mt)
+
+
+if __name__ == "__main__":
+    from argparse import ArgumentParser
+    from tempfile import TemporaryDirectory
+    from shutil import copyfile
+    from time import time
+    import errno
+
+    ap = ArgumentParser()
+
+    ca = ",".join(sorted(COMPRESSION["algorithm"]))
+    ca = ",".join([f"{{{ca}}}={{0..99}}"] + sorted(COMPRESSION["defaults"]))
+    ia = ",".join(sorted(IOFEATURES))
+
+    ap.add_argument("-f", "--fast", action="store_true")
+    ap.add_argument("-k", "--keep", action="store_true")
+    ap.add_argument("-s", "--sort", choices=["branch", "offset", "entry"], default="branch")
+    ap.add_argument("-c", "--compress", default="same", metavar=f"{{{ca}}}")
+    ap.add_argument("-i", "--iofeatures", "--iof", action="append", metavar=f"{{{ia}}}")
+    ap.add_argument("-v", "--verbose", action="count", default=0)
+    ap.add_argument("-o", "--output", help="if not set, update inplace")
+    ap.add_argument("-t", "--temp", action="store_true", help="copy input to tmp before processing")
+    ap.add_argument("-d", "--dry-run", action="store_true")
+    ap.add_argument("input", nargs="+")
+
+    args = ap.parse_args()
+    kwargs = dict(vars(args))
+    kwargs.pop("temp")
+    kwargs.pop("dry_run")
+
+    how = [
+        args.fast and "fast",
+        args.keep and "keep",
+        f"sort={args.sort}",
+        f"compress={args.compress}",
+        # None if args.output else "inplace",
+    ]
+    how = ", ".join(filter(None, how))
+    what = args.input[0] if len(args.input) == 1 else f"{len(args.input)} files"
+    what += f" to {args.output}" if args.output else " (inplace)"
+
+    if args.output is None:
+        if len(args.input) > 1:
+            raise RuntimeError("can't merge multiple files inplace")
+
+    if args.dry_run:
+        print(f"repacking ({how}) {what}")
+    else:
+        with TemporaryDirectory(prefix=Path(__file__).stem or None) as td:
+            t = [time()]
+            if args.output is None:
+                out = Path(td) / "output.root"
+                kwargs["output"] = out.as_posix()
+
+            if args.temp:
+                kwargs["input"] = [
+                    copyfile(fn, Path(td) / f"input_{i:03d}.root").as_posix()
+                    for i, fn in enumerate(args.input)
+                ]
+                t.append(time())
+
+            repack(**kwargs)
+            t.append(time())
+
+            if args.output is None:
+                inp = Path(args.input[0])
+                try:
+                    out.replace(inp)
+                except OSError as e:
+                    if e.errno == errno.EXDEV:  # hardlink attempt across devices
+                        with TemporaryDirectory(dir=inp.parent) as tc:
+                            tmp = Path(tc) / inp.name
+                            copyfile(out.as_posix(), tmp.as_posix())
+                            tmp.replace(inp)
+                    else:
+                        raise
+                t.append(time())
+
+            tt = t[-1] - t[0]
+            t = "+".join(f"{b-a:.1f}" for a, b in zip(t, t[1:]))
+
+            print(f"repacked ({how}) {what} in {t}={tt:.1f} seconds")
+
