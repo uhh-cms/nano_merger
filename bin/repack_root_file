@@ -6,9 +6,11 @@ Re-aligns and re-compresses root files for faster IO.
 
 Usage example:
 
-> repack_root_file -c LSTD=8 -s branch -o output.root input.root
+> repack_root_file -c ZSTD=8 -s branch -o output.root input.root
 
-For more info, see https://indico.fnal.gov/event/15154/contributions/29507/attachments/18630/23379/pivarski-lz4-bulkio-studies.pdf .
+For more info, see https://indico.fnal.gov/event/15154/contributions/29507/attachments/18630/23379/pivarski-lz4-bulkio-studies.pdf.
+
+Code adapted from https://git.rwth-aachen.de/3pia/cms_analyses/common/-/blob/master/scripts/root_repack.py.
 """
 
 from pathlib import Path
@@ -20,7 +22,7 @@ ROOT.gROOT.SetBatch()
 
 COMPRESSION = {
     lut.__name__[1:].lower(): {
-        k[len(pre) :]: getattr(lut, k)
+        k[len(pre):]: getattr(lut, k)
         for k in dir(lut)
         if k.startswith(pre) and not k.endswith("Undefined")
     }
@@ -38,7 +40,14 @@ IOFEATURES = {
 
 
 def repack(
-    output, input, fast=False, keep=False, sort="branch", compress="same", iofeatures=(), verbose=0
+    output,
+    input,
+    fast=False,
+    keep=False,
+    sort="branch",
+    compress="same",
+    iofeatures=(),
+    verbose=0,
 ):
     if Path(output).exists():
         raise RuntimeError("output files already esists %s" % output)
@@ -168,4 +177,3 @@ if __name__ == "__main__":
             t = "+".join(f"{b-a:.1f}" for a, b in zip(t, t[1:]))
 
             print(f"repacked ({how}) {what} in {t}={tt:.1f} seconds")
-

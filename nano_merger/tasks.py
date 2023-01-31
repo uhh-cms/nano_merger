@@ -11,6 +11,15 @@ import law
 from nano_merger.framework import DatasetTask, DatasetWrapperTask, HTCondorWorkflow
 
 
+# file size ratios to scale sum of files with default nano root compression to zstd
+compression_ratios = {
+    6: 1.24,
+    7: 1.16,
+    8: 1.13,
+    9: 1.08,
+}
+
+
 class GatherFiles(DatasetTask):
 
     def output(self):
@@ -20,15 +29,23 @@ class GatherFiles(DatasetTask):
         # define the base directory that is queried
         remote_base = self.dataset_config["remoteBase"]
         remote_dir = law.wlcg.WLCGDirectoryTarget(
-            os.path.join(self.dataset_config["miniAOD"].split("/")[1], f"crab_{self.dataset}"),
+            self.dataset_config["miniAOD"].split("/")[1],
             fs=f"wlcg_fs_{remote_base}",
         )
 
-        # loop through timestamps
+        # loop through timestamps, corresponding to the normal and the recovery jobs
         assert self.dataset_config["timestamps"]
         files = []
-        for timestamp in self.dataset_config["timestamps"]:
-            timestamp_dir = remote_dir.child(timestamp, type="d")
+        for recovery_index, timestamp in enumerate(self.dataset_config["timestamps"]):
+            # skip empty timestamp, pointing to empty submissions
+            if not timestamp:
+                continue
+
+            # build the submission directory and contained timestamp directory
+            submission_dir = f"crab_{self.dataset}"
+            if recovery_index:
+                submission_dir = f"{submission_dir}_recovery_{recovery_index}"
+            timestamp_dir = remote_dir.child(os.path.join(submission_dir, timestamp), type="d")
 
             # loop through numbered directories
             for num in timestamp_dir.listdir(pattern="0*", type="d"):
@@ -55,6 +72,8 @@ class ComputeMergingFactor(DatasetTask):
         description="the target size of the merged file; default unit is MB; default: 512MB",
     )
 
+    compression = 7
+
     def requires(self):
         return GatherFiles.req(self)
 
@@ -65,6 +84,7 @@ class ComputeMergingFactor(DatasetTask):
         # compute the merging factor
         files = self.input().load(formatter="json")
         size_files = sum([file["size"] for file in files]) / (1024 ** 2)
+        size_files *= compression_ratios[self.compression]
         merging_factor = int(math.ceil(len(files) / math.ceil(size_files / self.target_size)))
 
         # save the file
@@ -128,7 +148,7 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
         # random, yet deterministic uuidv4 hash
         seed_src = (
             self.dataset_config["miniAOD"],
-            self.dataset_config["timestamp"],
+            self.dataset_config["timestamps"],
             self.target_size,
             index,
         )
@@ -197,7 +217,39 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
         ])
 
     def merge(self, inputs, output):
-        law.root.hadd_task(self, inputs, output)
+        # default cwd
+        cwd = law.LocalDirectoryTarget(is_tmp=True)
+        cwd.touch()
+
+        # fetch files first into the cwd
+        with self.publish_step("fetching inputs ...", runtime=True):
+            def fetch(inp):
+                inp.copy_to_local(cwd.child(inp.unique_basename, type="f"), cache=False)
+                return inp.unique_basename
+
+            def callback(i):
+                self.publish_message(f"fetch file {i + 1} / {len(inputs)}")
+
+            bases = law.util.map_verbose(fetch, inputs, every=5, callback=callback)
+
+        # start merging into the localized output
+        with output.localize("w", cache=False) as tmp_out:
+            level = ComputeMergingFactor.compression if self.is_root else 1
+            with self.publish_step(f"merging with ZSTD={level} ...", runtime=True):
+                cmd = law.util.quote_cmd([
+                    "repack_root_file",
+                    "-c", f"ZSTD={level}",
+                    "-s", "branch",
+                    "-o", tmp_out.path,
+                    *bases,
+                ])
+                code = law.util.interruptable_popen(cmd, shell=True, executable="/bin/bash", cwd=cwd.path)[0]
+                if code != 0:
+                    raise Exception(f"repack_root_file failed with exit code {code}")
+
+            # print the size
+            output_size = law.util.human_bytes(tmp_out.stat().st_size, fmt=True)
+            self.publish_message(f"merged file size: {output_size}")
 
 
 class MergeFilesWrapper(DatasetWrapperTask):
