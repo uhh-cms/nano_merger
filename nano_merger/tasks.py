@@ -241,7 +241,7 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
             compr, level = ComputeMergingFactor.compression
             if self.is_root:
                 level = 1
-            with self.publish_step(f"merging with ZSTD={level} ...", runtime=True):
+            with self.publish_step(f"merging with {compr}={level} ...", runtime=True):
                 cmd = law.util.quote_cmd([
                     "repack_root_file",
                     "-c", f"{compr}={level}",
