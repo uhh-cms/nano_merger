@@ -239,7 +239,7 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
         # start merging into the localized output
         with output.localize("w", cache=False) as tmp_out:
             compr, level = ComputeMergingFactor.compression
-            if self.is_root:
+            if not self.is_root:
                 level = 1
             with self.publish_step(f"merging with {compr}={level} ...", runtime=True):
                 cmd = law.util.quote_cmd([
