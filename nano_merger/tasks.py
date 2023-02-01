@@ -11,12 +11,16 @@ import law
 from nano_merger.framework import DatasetTask, DatasetWrapperTask, HTCondorWorkflow
 
 
-# file size ratios to scale sum of files with default nano root compression to zstd
+# file size ratios to scale sum of files with default nano root compression to zstd/zlib
 compression_ratios = {
-    6: 1.24,
-    7: 1.16,
-    8: 1.13,
-    9: 1.08,
+    ("ZSTD", 6): 1.24,
+    ("ZSTD", 7): 1.16,
+    ("ZSTD", 8): 1.13,
+    ("ZSTD", 9): 1.08,
+    ("ZLIB", 6): 1.31,
+    ("ZLIB", 7): 1.29,
+    ("ZLIB", 8): 1.27,
+    ("ZLIB", 9): 1.26,
 }
 
 
@@ -72,7 +76,7 @@ class ComputeMergingFactor(DatasetTask):
         description="the target size of the merged file; default unit is MB; default: 512MB",
     )
 
-    compression = 7
+    compression = ("ZLIB", 9)
 
     def requires(self):
         return GatherFiles.req(self)
@@ -234,11 +238,13 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
 
         # start merging into the localized output
         with output.localize("w", cache=False) as tmp_out:
-            level = ComputeMergingFactor.compression if self.is_root else 1
+            compr, level = ComputeMergingFactor.compression
+            if self.is_root:
+                level = 1
             with self.publish_step(f"merging with ZSTD={level} ...", runtime=True):
                 cmd = law.util.quote_cmd([
                     "repack_root_file",
-                    "-c", f"ZSTD={level}",
+                    "-c", f"{compr}={level}",
                     "-s", "branch",
                     "-o", tmp_out.path,
                     *bases,
