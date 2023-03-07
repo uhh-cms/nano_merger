@@ -143,6 +143,14 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
         self._input_files_from_json = None
         self._merge_factor_from_json = None
 
+    def lfn_target(self, *path, fs="wlcg_fs"):
+        parts = (f"merged_{self.target_size}MB",) + tuple(map(str, path))
+        return law.wlcg.WLCGFileTarget(os.path.join(*parts), fs=fs)
+
+    def htcondor_output_postfix(self):
+        postfix = super().htcondor_output_postfix()
+        return f"{postfix}_{self.target_size}MB"
+
     def get_input_files_from_json(self, inp):
         if self._input_files_from_json is None:
             self._input_files_from_json = inp.load(formatter="json")
@@ -173,12 +181,9 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
         kind = "mc" if is_mc else "data"
         main_campaign, sub_campaign = campaign.split("-", 1)
         # replace the "miniAOD" part in the main campaign
-        main_campaign = re.sub(r"MiniAODv\d+", f"NanoAODv{self.global_config['nanoVersion']}", main_campaign)
+        main_campaign = re.sub(r"MiniAODv\d+", f"NanoAOD{self.global_config['nanoVersion']}", main_campaign)
 
         return f"/store/{kind}/{main_campaign}/{full_dataset}/NANOAOD{sim}/{sub_campaign}/0/{_hash}.root"
-
-    def store_parts(self):
-        return (f"merged_{self.target_size}MB",)
 
     def merge_workflow_requires(self):
         return {
@@ -222,8 +227,8 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
         # define the collection
         return law.SiblingFileCollection([
             {
-                "events": self.remote_target(lfn),
-                "stats": self.remote_target(f"{lfn[:-5]}.json"),
+                "events": self.lfn_target(lfn),
+                "stats": self.lfn_target(f"{lfn[:-5]}.json"),
             }
             for lfn in (
                 self.create_lfn(i).lstrip("/") for i in range(n_outputs)
@@ -305,7 +310,7 @@ class CreateEntry(DatasetTask):
         return MergeFiles.req(self)
 
     def output(self):
-        return self.local_target("entry.txt")
+        return self.local_target(f"entry_{self.target_size}MB.txt")
 
     def run(self):
         col = self.input()
@@ -330,7 +335,7 @@ class CreateEntry(DatasetTask):
 
         # extra information
         extra = ""
-        if self.dataset_config["sampleType"] == "data" or 1:
+        if self.dataset_config["sampleType"] == "data":
             era = re.match(r"^.+_Run\d{4}([^-]+)-.+$", self.dataset).group(1)
             extra = f"""
     aux={{
