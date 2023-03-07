@@ -13,9 +13,6 @@ import law
 from nano_merger.framework import DatasetTask, DatasetWrapperTask, HTCondorWorkflow
 
 
-law.contrib.load("root")
-
-
 # file size ratios to scale sum of files with default nano root compression to zstd/zlib
 compression_ratios = {
     ("ZSTD", 6): 1.24,
@@ -280,6 +277,7 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
             # determine the number of events at leaf stage, merge input json for all other stages
             if self.is_leaf():
                 # read number of events
+                law.contrib.load("root")
                 with tmp_out.load(formatter="root") as tfile:
                     tree = tfile.Get("Events")
                     n_events = int(tree.GetEntries()) if tree else 0
@@ -333,11 +331,20 @@ class CreateEntry(DatasetTask):
         # start creating the entry
         #
 
+        # DAS-like nano key
+        full_dataset, campaign, tier = self.dataset_config["miniAOD"].split("/")[1:]
+        campaign = re.sub(r"MiniAODv\d+", f"NanoAOD{self.global_config['nanoVersion']}", campaign)
+        tier = re.sub(r"MINI", "NANO", tier)
+        nano_key = f"/{full_dataset}/{campaign}/{tier}"
+
         # extra information
-        extra = ""
+        is_data_extra = ""
+        aux_extra = ""
         if self.dataset_config["sampleType"] == "data":
             era = re.match(r"^.+_Run\d{4}([^-]+)-.+$", self.dataset).group(1)
-            extra = f"""
+            is_data_extra = """
+    is_data=True,"""
+            aux_extra = f"""
     aux={{
         "era": "{era}",
     }},"""
@@ -346,14 +353,13 @@ class CreateEntry(DatasetTask):
         entry = f"""
 cpn.add_dataset(
     name="THE_NAME",
-    id={das_info['dataset_id']},
-    is_data={'True' if self.dataset_config['sampleType'] == 'data' else 'False'},
+    id={das_info['dataset_id']},{is_data_extra}
     processes=[procs.THE_PROCESS],
     keys=[
-        "{self.dataset_config['miniAOD']}",  # noqa
+        "{nano_key}",  # noqa
     ],
     n_files={n_files},
-    n_events={n_events},{extra}
+    n_events={n_events},{aux_extra}
 )
 """
 
