@@ -24,8 +24,9 @@ action() {
     # minimal software setup
     #
 
-    source "/afs/desy.de/user/r/riegerma/public/law_sw/setup_py3.sh" "" || return "$?"
+    source "/afs/desy.de/user/r/riegerma/public/law_sw/setup.sh" "" || return "$?"
     source "/cvmfs/grid.cern.ch/centos7-ui-160522/etc/profile.d/setup-c7-ui-python3-example.sh" "" || return "$?"
+    source "/cvmfs/cms.cern.ch/cmsset_default.sh" "" || return "$?"
 
     # custom path
     export PATH="${NM_BASE}/bin:${PATH}"

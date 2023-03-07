@@ -5,10 +5,15 @@ import math
 import random
 import uuid
 import re
+import json
+import subprocess
 
 import law
 
 from nano_merger.framework import DatasetTask, DatasetWrapperTask, HTCondorWorkflow
+
+
+law.contrib.load("root")
 
 
 # file size ratios to scale sum of files with default nano root compression to zstd/zlib
@@ -71,9 +76,9 @@ class GatherFiles(DatasetTask):
 class ComputeMergingFactor(DatasetTask):
 
     target_size = law.BytesParameter(
-        default=512.0,
+        default=2048.0,
         unit="MB",
-        description="the target size of the merged file; default unit is MB; default: 512MB",
+        description="the target size of the merged file; default unit is MB; default: 2048MB",
     )
 
     compression = ("ZLIB", 9)
@@ -216,8 +221,13 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
 
         # define the collection
         return law.SiblingFileCollection([
-            self.remote_target(self.create_lfn(i).lstrip("/"))
-            for i in range(n_outputs)
+            {
+                "events": self.remote_target(lfn),
+                "stats": self.remote_target(f"{lfn[:-5]}.json"),
+            }
+            for lfn in (
+                self.create_lfn(i).lstrip("/") for i in range(n_outputs)
+            )
         ])
 
     def merge(self, inputs, output):
@@ -225,7 +235,7 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
         cwd = law.LocalDirectoryTarget(is_tmp=True)
         cwd.touch()
 
-        # fetch files first into the cwd
+        # fetch event files first into the cwd
         with self.publish_step("fetching inputs ...", runtime=True):
             def fetch(inp):
                 inp.copy_to_local(cwd.child(inp.unique_basename, type="f"), cache=False)
@@ -234,10 +244,15 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
             def callback(i):
                 self.publish_message(f"fetch file {i + 1} / {len(inputs)}")
 
-            bases = law.util.map_verbose(fetch, inputs, every=5, callback=callback)
+            bases = law.util.map_verbose(
+                fetch,
+                inputs if self.is_leaf() else [inp["events"] for inp in inputs],
+                every=5,
+                callback=callback,
+            )
 
-        # start merging into the localized output
-        with output.localize("w", cache=False) as tmp_out:
+        # start merging events into the localized output
+        with output["events"].localize("w", cache=False) as tmp_out:
             compr, level = ComputeMergingFactor.compression
             if not self.is_root:
                 level = 1
@@ -257,6 +272,19 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
             output_size = law.util.human_bytes(tmp_out.stat().st_size, fmt=True)
             self.publish_message(f"merged file size: {output_size}")
 
+            # determine the number of events at leaf stage, merge input json for all other stages
+            if self.is_leaf():
+                # read number of events
+                with tmp_out.load(formatter="root") as tfile:
+                    tree = tfile.Get("Events")
+                    n_events = int(tree.GetEntries()) if tree else 0
+            else:
+                # merge json files
+                n_events = sum(inp["states"].load(formatter="json")["n_events"] for inp in inputs)
+
+        # save the stats
+        output["stats"].dump({"n_events": n_events}, indent=4, formatter="json")
+
 
 class MergeFilesWrapper(DatasetWrapperTask):
 
@@ -265,5 +293,102 @@ class MergeFilesWrapper(DatasetWrapperTask):
     def requires(self):
         return [
             MergeFiles.req(self, dataset=dataset)
+            for dataset in self.datasets
+        ]
+
+
+class CreateEntry(DatasetTask):
+
+    target_size = ComputeMergingFactor.target_size
+
+    def requires(self):
+        return MergeFiles.req(self)
+
+    def output(self):
+        return self.local_target("entry.txt")
+
+    def run(self):
+        col = self.input()
+
+        # get the number of files and events
+        n_files = len(col)
+        n_events = sum(inp["stats"].load(formatter="json")["n_events"] for inp in col.targets)
+
+        # get das info
+        das_info = self.get_das_info()
+
+        # compare number of events
+        if n_events != das_info["n_events"]:
+            raise Exception(
+                f"number of merged events ({n_events}) of dataset {self.dataset} does not " +
+                f"match DAS info ({das_info['n_events']})",
+            )
+
+        #
+        # start creating the entry
+        #
+
+        # extra information
+        extra = ""
+        if self.dataset_config["sampleType"] == "data" or 1:
+            era = re.match(r"^.+_Run\d{4}([^-]+)-.+$", self.dataset).group(1)
+            extra = f"""
+    aux={{
+        "era": "{era}",
+    }},"""
+
+        # the actual entry
+        entry = f"""
+cpn.add_dataset(
+    name="THE_NAME",
+    id={das_info['dataset_id']},
+    is_data={'True' if self.dataset_config['sampleType'] == 'data' else 'False'},
+    processes=[procs.THE_PROCESS],
+    keys=[
+        "{self.dataset_config['miniAOD']}",  # noqa
+    ],
+    n_files={n_files},
+    n_events={n_events},{extra}
+)
+"""
+
+        # print and save it
+        self.publish_message(entry)
+
+        self.output().dump(entry, formatter="text")
+
+    def get_das_info(self):
+        # build the command
+        das_key = self.dataset_config["miniAOD"]
+        cmd = f"dasgoclient -query='dataset={das_key}' -json"
+
+        # run it
+        self.publish_message(f"running '{cmd}'")
+        code, out, _ = law.util.interruptable_popen(cmd, shell=True, executable="/bin/bash",
+            stdout=subprocess.PIPE)
+        if code != 0:
+            raise Exception("dasgoclient query failed")
+
+        # parse it
+        das_info = {"n_events": None, "dataset_id": None}
+        for service_data in json.loads(out.strip()):
+            if service_data["das"]["services"][0] == "dbs3:filesummaries":
+                das_info["n_events"] = int(service_data["dataset"][0]["nevents"])
+            elif service_data["das"]["services"][0] == "dbs3:dataset_info":
+                das_info["dataset_id"] = int(service_data["dataset"][0]["dataset_id"])
+
+        if not all(das_info.values()):
+            raise Exception(f"could not determine all das info for {self.dataset}: {das_info}")
+
+        return das_info
+
+
+class CreateEntryWrapper(DatasetWrapperTask):
+
+    target_size = ComputeMergingFactor.target_size
+
+    def requires(self):
+        return [
+            CreateEntry.req(self, dataset=dataset)
             for dataset in self.datasets
         ]
