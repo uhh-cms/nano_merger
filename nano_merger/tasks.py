@@ -283,7 +283,7 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
                     n_events = int(tree.GetEntries()) if tree else 0
             else:
                 # merge json files
-                n_events = sum(inp["states"].load(formatter="json")["n_events"] for inp in inputs)
+                n_events = sum(inp["stats"].load(formatter="json")["n_events"] for inp in inputs)
 
         # save the stats
         output["stats"].dump({"n_events": n_events}, indent=4, formatter="json")
