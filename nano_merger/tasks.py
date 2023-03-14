@@ -5,8 +5,7 @@ import math
 import random
 import uuid
 import re
-import json
-import subprocess
+import urllib
 
 import law
 
@@ -300,6 +299,69 @@ class MergeFilesWrapper(DatasetWrapperTask):
         ]
 
 
+class ValidateEvents(DatasetTask):
+
+    def requires(self):
+        return GatherFiles.req(self)
+
+    def output(self):
+        return self.local_target("stats.json")
+
+    def run(self):
+        # create a list of input targets
+        targets = [
+            law.wlcg.WLCGFileTarget(
+                data["path"],
+                fs=f"wlcg_fs_{data['remote_base']}",
+            )
+            for data in self.input().load(formatter="json")
+        ]
+
+        # create a list of local paths pointing to the /pnfs mount
+        paths = [
+            urllib.parse.urlparse(target.uri()).path
+            for target in targets
+        ]
+
+        # open all files and extract the number of events
+        law.contrib.load("root")
+        progress = self.create_progress_callback(len(paths))
+        n_events = []
+        with self.publish_step("opening files ..."):
+            for i, path in enumerate(paths):
+                with law.LocalFileTarget(path).load(formatter="root") as tfile:
+                    tree = tfile.Get("Events")
+                    _n_events = int(tree.GetEntries()) if tree else 0
+                n_events.append(_n_events)
+                self.publish_message(f"events in / after file {i}: {_n_events} / {sum(n_events)}")
+                progress(i)
+        n_events_total = sum(n_events)
+
+        # compare with DAS
+        das_info = self.get_das_info()
+        if n_events_total != das_info["n_events"]:
+            raise Exception(
+                f"number of merged events ({n_events_total}) of dataset {self.dataset} does not " +
+                f"match DAS info ({das_info['n_events']})",
+            )
+
+        # save the results
+        data = {
+            "n_events": n_events_total,
+            "per_file": dict(zip(paths, n_events)),
+        }
+        self.output().dump(data, formatter="json")
+
+
+class ValidateEventsWrapper(DatasetWrapperTask):
+
+    def requires(self):
+        return [
+            ValidateEvents.req(self, dataset=dataset)
+            for dataset in self.datasets
+        ]
+
+
 class CreateEntry(DatasetTask):
 
     target_size = ComputeMergingFactor.target_size
@@ -367,31 +429,6 @@ cpn.add_dataset(
         self.publish_message(entry)
 
         self.output().dump(entry, formatter="text")
-
-    def get_das_info(self):
-        # build the command
-        das_key = self.dataset_config["miniAOD"]
-        cmd = f"dasgoclient -query='dataset={das_key}' -json"
-
-        # run it
-        self.publish_message(f"running '{cmd}'")
-        code, out, _ = law.util.interruptable_popen(cmd, shell=True, executable="/bin/bash",
-            stdout=subprocess.PIPE)
-        if code != 0:
-            raise Exception("dasgoclient query failed")
-
-        # parse it
-        das_info = {"n_events": None, "dataset_id": None}
-        for service_data in json.loads(out.strip()):
-            if service_data["das"]["services"][0] == "dbs3:filesummaries":
-                das_info["n_events"] = int(service_data["dataset"][0]["nevents"])
-            elif service_data["das"]["services"][0] == "dbs3:dataset_info":
-                das_info["dataset_id"] = int(service_data["dataset"][0]["dataset_id"])
-
-        if not all(das_info.values()):
-            raise Exception(f"could not determine all das info for {self.dataset}: {das_info}")
-
-        return das_info
 
 
 class CreateEntryWrapper(DatasetWrapperTask):

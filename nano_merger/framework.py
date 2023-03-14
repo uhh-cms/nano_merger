@@ -6,6 +6,8 @@ Base tasks.
 
 import os
 import math
+import subprocess
+import json
 
 import luigi
 import law
@@ -73,6 +75,31 @@ class DatasetTask(ConfigTask):
     def htcondor_destination_info(self, info):
         info.append(self.dataset)
         return info
+
+    def get_das_info(self):
+        # build the command
+        das_key = self.dataset_config["miniAOD"]
+        cmd = f"dasgoclient -query='dataset={das_key}' -json"
+
+        # run it
+        self.publish_message(f"running '{cmd}'")
+        code, out, _ = law.util.interruptable_popen(cmd, shell=True, executable="/bin/bash",
+            stdout=subprocess.PIPE)
+        if code != 0:
+            raise Exception("dasgoclient query failed")
+
+        # parse it
+        das_info = {"n_events": None, "dataset_id": None}
+        for service_data in json.loads(out.strip()):
+            if service_data["das"]["services"][0] == "dbs3:filesummaries":
+                das_info["n_events"] = int(service_data["dataset"][0]["nevents"])
+            elif service_data["das"]["services"][0] == "dbs3:dataset_info":
+                das_info["dataset_id"] = int(service_data["dataset"][0]["dataset_id"])
+
+        if not all(das_info.values()):
+            raise Exception(f"could not determine all das info for {self.dataset}: {das_info}")
+
+        return das_info
 
 
 class DatasetWrapperTask(ConfigTask, law.WrapperTask):
