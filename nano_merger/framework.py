@@ -70,6 +70,10 @@ class DatasetTask(ConfigTask):
     def store_parts(self):
         return super().store_parts() + (self.dataset,)
 
+    def htcondor_destination_info(self, info):
+        info.append(self.dataset)
+        return info
+
 
 class DatasetWrapperTask(ConfigTask, law.WrapperTask):
 
