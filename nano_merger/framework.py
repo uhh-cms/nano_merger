@@ -72,10 +72,6 @@ class DatasetTask(ConfigTask):
     def store_parts(self):
         return super().store_parts() + (self.dataset,)
 
-    def htcondor_destination_info(self, info):
-        info.append(self.dataset)
-        return info
-
     def get_das_info(self):
         # build the command
         das_key = self.dataset_config["miniAOD"]

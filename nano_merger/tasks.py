@@ -144,8 +144,16 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
         return law.wlcg.WLCGFileTarget(os.path.join(*parts), fs=fs)
 
     def htcondor_output_postfix(self):
-        postfix = super().htcondor_output_postfix()
-        return f"{postfix}_{self.target_size}MB"
+        postfix1 = super().htcondor_output_postfix()
+        postfix2 = f"{self.target_size}MB"
+        return f"{postfix1}_{postfix2}" if postfix1 else postfix2
+
+    def htcondor_destination_info(self, info):
+        info += [
+            self.dataset,
+            f"file {self.tree_index}",
+        ]
+        return info
 
     def get_input_files_from_json(self, inp):
         if self._input_files_from_json is None:
