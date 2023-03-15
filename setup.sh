@@ -17,7 +17,14 @@ action() {
     export NM_LOCAL_SCHEDULER="${NM_LOCAL_SCHEDULER:-true}"
     export NM_SCHEDULER_HOST="${NM_SCHEDULER_HOST:-naf-cms16.desy.de}"
     export NM_SCHEDULER_PORT="${NM_SCHEDULER_PORT:-8082}"
+    export NM_WCLG_USE_CACHE="true"
     export NM_WLCG_CACHE_ROOT="${NM_WLCG_CACHE_ROOT:-/nfs/dust/cms/user/$(whoami)/nm_wlcg_cache}"
+
+    # adjustments for remote jobs
+    if [ "${NM_REMOTE_JOB}" = "1" ]; then
+        export NM_WCLG_USE_CACHE="false"
+        export NM_WLCG_CACHE_ROOT=""
+    fi
 
 
     #
