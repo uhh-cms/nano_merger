@@ -327,7 +327,7 @@ class ValidateEvents(DatasetTask):
         law.contrib.load("root")
         progress = self.create_progress_callback(len(paths))
         n_events = []
-        with self.publish_step("opening files ..."):
+        with self.publish_step(f"opening {len(paths)} files ..."):
             for i, path in enumerate(paths):
                 with law.LocalFileTarget(path).load(formatter="root") as tfile:
                     tree = tfile.Get("Events")
