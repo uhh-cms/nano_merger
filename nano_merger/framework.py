@@ -103,6 +103,7 @@ class DatasetWrapperTask(ConfigTask, law.WrapperTask):
     datasets = law.CSVParameter(
         default=("*",),
         description="comma-separated list of datasets to run; default: all",
+        brace_expand=True,
     )
 
     def __init__(self, *args, **kwargs):
