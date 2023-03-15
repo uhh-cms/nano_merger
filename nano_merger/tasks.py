@@ -341,7 +341,7 @@ class ValidateEvents(DatasetTask):
         das_info = self.get_das_info()
         if n_events_total != das_info["n_events"]:
             raise Exception(
-                f"number of merged events ({n_events_total}) of dataset {self.dataset} does not " +
+                f"number of events ({n_events_total}) of dataset {self.dataset} does not " +
                 f"match DAS info ({das_info['n_events']})",
             )
 
