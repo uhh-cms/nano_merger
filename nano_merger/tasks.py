@@ -115,55 +115,106 @@ class ComputeMergingFactorWrapper(DatasetWrapperTask):
         ]
 
 
-class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
+class MergeFiles(DatasetTask, law.LocalWorkflow, HTCondorWorkflow):
 
     target_size = ComputeMergingFactor.target_size
-
-    # number of files to merge into a single output
-    merge_factor = 8
-
-    @classmethod
-    def _req_tree(cls, inst, *args, **kwargs):
-        new_inst = super()._req_tree(inst, *args, **kwargs)
-
-        # forward cache values
-        new_inst._input_files_from_json = inst._input_files_from_json
-        new_inst._merge_factor_from_json = inst._merge_factor_from_json
-
-        return new_inst
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # cache for merging info
-        self._input_files_from_json = None
-        self._merge_factor_from_json = None
+        # don't cache by default, but only if requirements exist
+        self._cache_branches = False
 
-    def lfn_target(self, *path, fs="wlcg_fs"):
-        parts = (f"merged_{self.target_size}MB",) + tuple(map(str, path))
-        return law.wlcg.WLCGFileTarget(os.path.join(*parts), fs=fs)
+    def create_branch_map(self):
+        reqs = self.workflow_requires()
+        if not reqs["factor"].complete():
+            return [None]
 
-    def htcondor_output_postfix(self):
-        postfix1 = super().htcondor_output_postfix()
-        postfix2 = f"{self.target_size}MB"
-        return f"{postfix1}_{postfix2}" if postfix1 else postfix2
+        self._cache_branches = True
+        n_files = len(reqs["files"].output().load(formatter="json"))
+        merging_factor = reqs["factor"].output().load(formatter="json")["merging_factor"]
 
-    def htcondor_destination_info(self, info):
-        info += [
-            self.dataset,
-            f"file {self.tree_index}",
+        return list(law.util.iter_chunks(n_files, merging_factor))
+
+    def workflow_requires(self):
+        return {
+            "files": GatherFiles.req(self),
+            "factor": ComputeMergingFactor.req(self),
+        }
+
+    def requires(self):
+        return {
+            "files": GatherFiles.req(self),
+            "factor": ComputeMergingFactor.req(self),
+        }
+
+    def output(self):
+        lfn = self.create_lfn(self.branch).lstrip("/")
+        size_str = f"merged_{self.target_size}MB"
+        lfn_target = lambda lfn: law.wlcg.WLCGFileTarget(os.path.join(size_str, lfn), fs="wlcg_fs")
+
+        return {
+            "events": lfn_target(lfn),
+            "stats": lfn_target(f"{lfn[:-5]}.json"),
+        }
+
+    def run(self):
+        # define inputs
+        inputs = [
+            law.wlcg.WLCGFileTarget(f["path"], fs=f"wlcg_fs_{f['remote_base']}")
+            for i, f in enumerate(self.input()["files"].load(formatter="json"))
+            if i in self.branch_data
         ]
-        return info
 
-    def get_input_files_from_json(self, inp):
-        if self._input_files_from_json is None:
-            self._input_files_from_json = inp.load(formatter="json")
-        return self._input_files_from_json
+        # default cwd
+        cwd = law.LocalDirectoryTarget(is_tmp=True)
+        cwd.touch()
 
-    def get_merge_factor_from_json(self, inp):
-        if self._merge_factor_from_json is None:
-            self._merge_factor_from_json = inp.load(formatter="json")["merging_factor"]
-        return self._merge_factor_from_json
+        # fetch event files first into the cwd
+        with self.publish_step("fetching inputs ...", runtime=True):
+            def fetch(inp):
+                inp.copy_to_local(cwd.child(inp.unique_basename, type="f"), cache=False)
+                return inp.unique_basename
+
+            def callback(i):
+                self.publish_message(f"fetch file {i + 1} / {len(inputs)}")
+
+            bases = law.util.map_verbose(
+                fetch,
+                inputs,
+                every=5,
+                callback=callback,
+            )
+
+        # start merging events into the localized output
+        outputs = self.output()
+        with outputs["events"].localize("w", cache=False) as tmp_out:
+            compr, level = ComputeMergingFactor.compression
+            level = 0
+            with self.publish_step(f"merging with {compr}={level} ...", runtime=True):
+                cmd = law.util.quote_cmd([
+                    "repack_root_file",
+                    "-c", f"{compr}={level}",
+                    "-s", "branch",
+                    "-o", tmp_out.path,
+                    *bases,
+                ])
+                code = law.util.interruptable_popen(cmd, shell=True, executable="/bin/bash", cwd=cwd.path)[0]
+                if code != 0:
+                    raise Exception(f"repack_root_file failed with exit code {code}")
+
+            # print the size
+            output_size = law.util.human_bytes(tmp_out.stat().st_size, fmt=True)
+            self.publish_message(f"merged file size: {output_size}")
+
+            # determine the number of events
+            law.contrib.load("root")
+            with tmp_out.load(formatter="root") as tfile:
+                tree = tfile.Get("Events")
+                n_events = int(tree.GetEntries()) if tree else 0
+
+        # save the stats
+        outputs["stats"].dump({"n_events": n_events}, indent=4, formatter="json")
 
     def create_lfn(self, index):
         # random, yet deterministic uuidv4 hash
@@ -189,111 +240,13 @@ class MergeFiles(DatasetTask, law.tasks.ForestMerge, HTCondorWorkflow):
 
         return f"/store/{kind}/{main_campaign}/{full_dataset}/NANOAOD{sim}/{sub_campaign}/0/{_hash}.root"
 
-    def merge_workflow_requires(self):
-        return {
-            "files": GatherFiles.req(self),
-            "factor": ComputeMergingFactor.req(self),
-        }
+    def htcondor_output_postfix(self):
+        postfix1 = super().htcondor_output_postfix()
+        postfix2 = f"{self.target_size}MB"
+        return f"{postfix1}_{postfix2}" if postfix1 else postfix2
 
-    def trace_merge_workflow_inputs(self, inputs):
-        return len(self.get_input_files_from_json(inputs["files"]))
-
-    def merge_requires(self, start_leaf, end_leaf):
-        return {
-            "files": GatherFiles.req(self),
-            "factor": ComputeMergingFactor.req(self),
-        }
-
-    def trace_merge_inputs(self, inputs):
-        # get file info
-        files = self.get_input_files_from_json(inputs["files"])[slice(*self.leaf_range)]
-
-        # map to wlcg file targets
-        targets = [
-            law.wlcg.WLCGFileTarget(f["path"], fs=f"wlcg_fs_{f['remote_base']}")
-            for f in files
-        ]
-
-        return targets
-
-    def merge_output(self):
-        # return a dummy output as long as the requirements are incomplete
-        reqs = self.merge_workflow_requires()
-        if not all(req.complete() for req in reqs.values()):
-            output = self.local_target("DUMMY_UNTIL_INPUTS_EXIST")
-            return self._mark_merge_output_placeholder(output)
-
-        # determine the number of outputs
-        n_inputs = len(self.get_input_files_from_json(reqs["files"].output()))
-        merge_factor = self.get_merge_factor_from_json(reqs["factor"].output())
-        n_outputs = int(math.ceil(n_inputs / merge_factor))
-
-        # define the collection
-        return law.SiblingFileCollection([
-            {
-                "events": self.lfn_target(lfn),
-                "stats": self.lfn_target(f"{lfn[:-5]}.json"),
-            }
-            for lfn in (
-                self.create_lfn(i).lstrip("/") for i in range(n_outputs)
-            )
-        ])
-
-    def merge(self, inputs, output):
-        # default cwd
-        cwd = law.LocalDirectoryTarget(is_tmp=True)
-        cwd.touch()
-
-        # fetch event files first into the cwd
-        with self.publish_step("fetching inputs ...", runtime=True):
-            def fetch(inp):
-                inp.copy_to_local(cwd.child(inp.unique_basename, type="f"), cache=False)
-                return inp.unique_basename
-
-            def callback(i):
-                self.publish_message(f"fetch file {i + 1} / {len(inputs)}")
-
-            bases = law.util.map_verbose(
-                fetch,
-                inputs if self.is_leaf() else [inp["events"] for inp in inputs],
-                every=5,
-                callback=callback,
-            )
-
-        # start merging events into the localized output
-        with output["events"].localize("w", cache=False) as tmp_out:
-            compr, level = ComputeMergingFactor.compression
-            if not self.is_root:
-                level = 1
-            with self.publish_step(f"merging with {compr}={level} ...", runtime=True):
-                cmd = law.util.quote_cmd([
-                    "repack_root_file",
-                    "-c", f"{compr}={level}",
-                    "-s", "branch",
-                    "-o", tmp_out.path,
-                    *bases,
-                ])
-                code = law.util.interruptable_popen(cmd, shell=True, executable="/bin/bash", cwd=cwd.path)[0]
-                if code != 0:
-                    raise Exception(f"repack_root_file failed with exit code {code}")
-
-            # print the size
-            output_size = law.util.human_bytes(tmp_out.stat().st_size, fmt=True)
-            self.publish_message(f"merged file size: {output_size}")
-
-            # determine the number of events at leaf stage, merge input json for all other stages
-            if self.is_leaf():
-                # read number of events
-                law.contrib.load("root")
-                with tmp_out.load(formatter="root") as tfile:
-                    tree = tfile.Get("Events")
-                    n_events = int(tree.GetEntries()) if tree else 0
-            else:
-                # merge json files
-                n_events = sum(inp["stats"].load(formatter="json")["n_events"] for inp in inputs)
-
-        # save the stats
-        output["stats"].dump({"n_events": n_events}, indent=4, formatter="json")
+    def htcondor_destination_info(self, info):
+        return info + [self.dataset]
 
 
 class MergeFilesWrapper(DatasetWrapperTask):
@@ -381,11 +334,14 @@ class CreateEntry(DatasetTask):
         return self.local_target(f"entry_{self.target_size}MB.txt")
 
     def run(self):
-        col = self.input()
+        col = self.input()["collection"]
 
         # get the number of files and events
         n_files = len(col)
-        n_events = sum(inp["stats"].load(formatter="json")["n_events"] for inp in col.targets)
+        n_events = sum(
+            inp["stats"].load(formatter="json")["n_events"]
+            for inp in col.targets.values()
+        )
 
         # get das info
         das_info = self.get_das_info()
