@@ -190,7 +190,6 @@ class MergeFiles(DatasetTask, law.LocalWorkflow, HTCondorWorkflow):
         outputs = self.output()
         with outputs["events"].localize("w", cache=False) as tmp_out:
             compr, level = ComputeMergingFactor.compression
-            level = 0
             with self.publish_step(f"merging with {compr}={level} ...", runtime=True):
                 cmd = law.util.quote_cmd([
                     "repack_root_file",
