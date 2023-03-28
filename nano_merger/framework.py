@@ -125,10 +125,10 @@ class HTCondorWorkflow(law.htcondor.HTCondorWorkflow):
         description="transfer job logs to the output directory; default: True",
     )
     max_runtime = law.DurationParameter(
-        default=2.0,
+        default=6.0,
         unit="h",
         significant=False,
-        description="maximum runtime; default unit is hours; default: 2",
+        description="maximum runtime; default unit is hours; default: 6",
     )
     htcondor_flavor = luigi.ChoiceParameter(
         default="naf",
