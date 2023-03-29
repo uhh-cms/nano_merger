@@ -125,10 +125,17 @@ class HTCondorWorkflow(law.htcondor.HTCondorWorkflow):
         description="transfer job logs to the output directory; default: True",
     )
     max_runtime = law.DurationParameter(
-        default=6.0,
+        default=8.0,
         unit="h",
         significant=False,
-        description="maximum runtime; default unit is hours; default: 6",
+        description="maximum runtime; default unit is hours; default: 8",
+    )
+    htcondor_memory = law.BytesParameter(
+        default=law.NO_FLOAT,
+        unit="MB",
+        significant=False,
+        description="requested memeory in MB; empty value leads to the cluster default setting; "
+        "empty default",
     )
     htcondor_flavor = luigi.ChoiceParameter(
         default="naf",
@@ -177,7 +184,13 @@ class HTCondorWorkflow(law.htcondor.HTCondorWorkflow):
             config.custom_content.append(("requirements", '(OpSysAndVer == "CentOS7")'))
 
         # max runtime
-        config.custom_content.append(("+MaxRuntime", int(math.floor(self.max_runtime * 3600)) - 1))
+        max_runtime = int(math.floor(self.max_runtime * 3600)) - 1
+        config.custom_content.append(("+MaxRuntime", max_runtime))
+        config.custom_content.append(("+RequestRuntime", max_runtime))
+
+        # request memory
+        if self.htcondor_memory > 0:
+            config.custom_content.append(("Request_Memory", self.htcondor_memory))
 
         # render variables
         config.render_variables["nm_bootstrap_name"] = "htcondor_standalone"
