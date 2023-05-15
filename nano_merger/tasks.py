@@ -269,6 +269,7 @@ class ValidateEvents(DatasetTask):
 
     def run(self):
         # create a list of input targets
+
         targets = [
             law.wlcg.WLCGFileTarget(
                 data["path"],
@@ -288,7 +289,7 @@ class ValidateEvents(DatasetTask):
         progress = self.create_progress_callback(len(paths))
         n_events = []
         with self.publish_step(f"opening {len(paths)} files ..."):
-            for i, path in enumerate(paths):
+            for i, path in enumerate(paths, start=1):
                 with law.LocalFileTarget(path).load(formatter="root") as tfile:
                     tree = tfile.Get("Events")
                     _n_events = int(tree.GetEntries()) if tree else 0

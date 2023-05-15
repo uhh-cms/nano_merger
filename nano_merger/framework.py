@@ -39,6 +39,12 @@ class ConfigTask(Task):
         "$NM_BASE/modules/Framework/config; default: samples_2017_uhh.yaml",
     )
 
+    exclude_config = luigi.Parameter(
+        default="",
+        description="external yaml file used to exclude certain lfns; resolved relative to "
+        "$NM_BASE/modules/Framework/config; default: to empty string, so nothing is excluded" ,
+        )
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -46,11 +52,18 @@ class ConfigTask(Task):
         config = self.config
         if not os.path.exists(os.path.expandvars(os.path.expanduser(config))):
             config = os.path.join("$NM_BASE/modules/Framework/config", config)
-        data = law.LocalFileTarget(config).load(formatter="yaml")
 
+        data = law.LocalFileTarget(config).load(formatter="yaml")
         # store global config and per dataset configs
         self.global_config = data["GLOBAL"]
         self.datasets_config = {name: cfg for name, cfg in data.items() if name != "GLOBAL"}
+
+
+        exclude_config = self.exclude_config
+        if self.exclude_config and not os.path.exists(os.path.expandvars(os.path.expanduser(exclude_config))):
+            exclude_config = os.path.join("$NM_BASE/modules/Framework/config", exclude_config)
+            exclude_data = law.LocalFileTarget(exclude_config).load(formatter="yaml")
+            self.exclude_lfns = {name: cfg for name, cfg in exclude_data.items() if name != "GLOBAL"}
 
     def store_parts(self):
         return super().store_parts() + (os.path.splitext(os.path.basename(self.config))[0],)
@@ -62,6 +75,8 @@ class DatasetTask(ConfigTask):
         default="GluGluToHHTo2B2Tau",
         description="the dataset to process; default: GluGluToHHTo2B2Tau",
     )
+
+
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -75,8 +90,13 @@ class DatasetTask(ConfigTask):
     def get_das_info(self):
         # build the command
         das_key = self.dataset_config["miniAOD"]
-        cmd = f"dasgoclient -query='dataset={das_key}' -json"
 
+        if self.exclude_config:
+            # get information about all files separatly
+            cmd = f"dasgoclient -query='file dataset={das_key}' -json"
+        else:
+            # get summary information about
+            cmd = f"dasgoclient -query='dataset={das_key}' -json"
         # run it
         self.publish_message(f"running '{cmd}'")
         code, out, _ = law.util.interruptable_popen(cmd, shell=True, executable="/bin/bash",
@@ -86,16 +106,39 @@ class DatasetTask(ConfigTask):
 
         # parse it
         das_info = {"n_events": None, "dataset_id": None}
-        for service_data in json.loads(out.strip()):
-            if service_data["das"]["services"][0] == "dbs3:filesummaries":
-                das_info["n_events"] = int(service_data["dataset"][0]["nevents"])
-            elif service_data["das"]["services"][0] == "dbs3:dataset_info":
-                das_info["dataset_id"] = int(service_data["dataset"][0]["dataset_id"])
+
+        if self.exclude_config:
+            ignore_lfns = set(self.exclude_lfns[self.dataset]["miniAOD_ignoreFiles"])
+
+            valid_files = []
+            for dbs_info in json.loads(out.strip()):
+                dbs_file = dbs_info["file"][0]
+                if dbs_file["is_file_valid"] and dbs_file["name"] not in ignore_lfns:
+                    valid_files.append(dbs_file["nevents"])
+                dataset_id = dbs_file["dataset_id"]
+
+            das_info["n_events"] = sum(valid_files)
+            das_info["dataset_id"] = dataset_id
+        else:
+            for service_data in json.loads(out.strip()):
+                if service_data["das"]["services"][0] == "dbs3:filesummaries":
+                    das_info["n_events"] = int(service_data["dataset"][0]["nevents"])
+                elif service_data["das"]["services"][0] == "dbs3:dataset_info":
+                    das_info["dataset_id"] = int(service_data["dataset"][0]["dataset_id"])
 
         if not all(das_info.values()):
             raise Exception(f"could not determine all das info for {self.dataset}: {das_info}")
 
         return das_info
+
+    def get_entries_of_valid(dbs_file_list, to_ignore_files):
+        to_ignore_files = set(to_ignore_files)
+        valid_files, invalid_files = [], []
+        for dbs_file in dbs_file_list:
+            if dbs_file["is_file_valid"] and dbs_file["logical_file_name"] not in to_ignore_files:
+                valid_files.append(dbs_file['event_count'])
+        return sum(valid_files)
+
 
 
 class DatasetWrapperTask(ConfigTask, law.WrapperTask):
