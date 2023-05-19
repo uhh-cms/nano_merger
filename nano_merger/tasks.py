@@ -77,7 +77,7 @@ class ComputeMergingFactor(DatasetTask):
         description="the target size of the merged file; default unit is MB; default: 2048MB",
     )
 
-    compression = ("ZLIB", 9)
+    compression = ("ZSTD", 9)
 
     def requires(self):
         return GatherFiles.req(self)
@@ -89,7 +89,7 @@ class ComputeMergingFactor(DatasetTask):
         # compute the merging factor
         files = self.input().load(formatter="json")
         size_files = sum([file["size"] for file in files]) / (1024 ** 2)
-        size_files *= compression_ratios[self.compression]
+        size_files *= compression_ratios.get(self.compression, 1.0)
         merging_factor = int(math.ceil(len(files) / math.ceil(size_files / self.target_size)))
 
         # save the file

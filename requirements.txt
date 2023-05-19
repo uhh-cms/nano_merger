@@ -1,0 +1,4 @@
+# linting only
+flake8~=5.0
+flake8-commas~=2.0
+flake8-quotes~=3.0
