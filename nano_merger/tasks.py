@@ -269,7 +269,6 @@ class ValidateEvents(DatasetTask):
 
     def run(self):
         # create a list of input targets
-
         targets = [
             law.wlcg.WLCGFileTarget(
                 data["path"],
