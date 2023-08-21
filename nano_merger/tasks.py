@@ -6,6 +6,7 @@ import random
 import uuid
 import re
 import urllib
+from collections import defaultdict
 
 import law
 
@@ -25,22 +26,17 @@ compression_ratios = {
 }
 
 
-class GatherFiles(DatasetTask):
+class CrabOutputUser(DatasetTask):
 
-    def output(self):
-        return self.remote_target("files.json")
-
-    def run(self):
+    def iter_crab_outputs(self, **kwargs):
         # define the base directory that is queried
-        remote_base = self.dataset_config["remoteBase"]
         remote_dir = law.wlcg.WLCGDirectoryTarget(
             self.dataset_config["miniAOD"].split("/")[1],
-            fs=f"wlcg_fs_{remote_base}",
+            fs=self.wlcg_fs_source,
         )
 
         # loop through timestamps, corresponding to the normal and the recovery jobs
         assert self.dataset_config["timestamps"]
-        files = []
         for recovery_index, timestamp in enumerate(self.dataset_config["timestamps"]):
             # skip empty timestamp, pointing to empty submissions
             if not timestamp:
@@ -56,14 +52,56 @@ class GatherFiles(DatasetTask):
             for num in timestamp_dir.listdir(pattern="0*", type="d"):
                 numbered_dir = timestamp_dir.child(num, type="d")
 
-                # loop through root files
-                for name in numbered_dir.listdir(pattern="*.root", type="f"):
-                    root_file = numbered_dir.child(name, type="f")
-                    files.append({
-                        "path": root_file.path,
-                        "size": root_file.stat().st_size,
-                        "remote_base": remote_base,
-                    })
+                # loop through directory content and loop
+                for name in numbered_dir.listdir(**kwargs):
+                    yield numbered_dir.child(name, type=kwargs.get("type"))
+
+
+class UnpackFiles(CrabOutputUser):
+
+    def output(self):
+        return self.local_target("mapping.json")
+
+    def run(self):
+        # mapping from tar file name to contained root files
+        contents = defaultdict(list)
+
+        # loop
+        for target in self.iter_crab_outputs(pattern="*.tar", type="f"):
+            # unpack into tmp dir
+            tmp = law.LocalDirectoryTarget(is_tmp=True)
+            tmp.touch()
+            target.load(tmp, formatter="tar")
+
+            # loop through unpacked root files
+            for name in tmp.listdir(pattern="*.root", type="f"):
+                # fill mapping
+                contents[target.basename].append(name)
+
+                # upload
+                target.sibling(name, type="f").copy_from_local(tmp.child(name, type="f"))
+
+        # save the file info
+        self.output().dump(contents, indent=4, formatter="json")
+
+
+class GatherFiles(CrabOutputUser):
+
+    def requires(self):
+        return UnpackFiles.req(self)
+
+    def output(self):
+        return self.remote_target("files.json")
+
+    def run(self):
+        # collect files
+        files = []
+        for target in self.iter_crab_outputs(pattern="*.root", type="f"):
+            files.append({
+                "path": target.path,
+                "size": target.stat().st_size,
+                "remote_base": self.dataset_config["remoteBase"],
+            })
 
         # save the file info
         self.output().dump(files, indent=4, formatter="json")
@@ -77,7 +115,8 @@ class ComputeMergingFactor(DatasetTask):
         description="the target size of the merged file; default unit is MB; default: 2048MB",
     )
 
-    compression = ("ZSTD", 9)
+    # compression = ("ZSTD", 9)
+    compression = ("ZSTD", 1)
 
     def requires(self):
         return GatherFiles.req(self)
@@ -151,7 +190,7 @@ class MergeFiles(DatasetTask, law.LocalWorkflow, HTCondorWorkflow):
     def output(self):
         lfn = self.create_lfn(self.branch).lstrip("/")
         size_str = f"merged_{self.target_size}MB"
-        lfn_target = lambda lfn: law.wlcg.WLCGFileTarget(os.path.join(size_str, lfn), fs="wlcg_fs")
+        lfn_target = lambda lfn: law.wlcg.WLCGFileTarget(os.path.join(size_str, lfn), fs=self.wlcg_fs_target)
 
         return {
             "events": lfn_target(lfn),
@@ -161,7 +200,7 @@ class MergeFiles(DatasetTask, law.LocalWorkflow, HTCondorWorkflow):
     def run(self):
         # define inputs
         inputs = [
-            law.wlcg.WLCGFileTarget(f["path"], fs=f"wlcg_fs_{f['remote_base']}")
+            law.wlcg.WLCGFileTarget(f["path"], fs=self.wlcg_fs_source)
             for i, f in enumerate(self.input()["files"].load(formatter="json"))
             if i in self.branch_data
         ]
@@ -270,10 +309,7 @@ class ValidateEvents(DatasetTask):
     def run(self):
         # create a list of input targets
         targets = [
-            law.wlcg.WLCGFileTarget(
-                data["path"],
-                fs=f"wlcg_fs_{data['remote_base']}",
-            )
+            law.wlcg.WLCGFileTarget(data["path"], fs=self.wlcg_fs_source)
             for data in self.input().load(formatter="json")
         ]
 

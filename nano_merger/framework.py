@@ -34,43 +34,65 @@ class Task(law.Task):
 class ConfigTask(Task):
 
     config = luigi.Parameter(
-        default="samples_2017_uhh.yaml",
-        description="config file to load; resolved relative to "
-        "$NM_BASE/modules/Framework/config; default: samples_2017_uhh.yaml",
+        default="Run2_2016_uhh",
+        description="directory with config files to load; resolved relative to "
+        "$NM_BASE/modules/NanoProd/NanoProd/crab; default: Run2_2016_uhh",
     )
 
-    exclude_config = luigi.Parameter(
-        default=law.NO_STR,
-        description="external yaml file used to exclude certain lfns; resolved relative to "
-        "$NM_BASE/modules/Framework/config; default: empty",
-    )
+    # exclude_config = luigi.Parameter(
+    #     default=law.NO_STR,
+    #     description="external yaml file used to exclude certain lfns; resolved relative to "
+    #     "$NM_BASE/modules/Framework/config; default: empty",
+    # )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # load the config
-        config = self.config
-        if not os.path.exists(os.path.expandvars(os.path.expanduser(config))):
-            config = os.path.join("$NM_BASE/modules/Framework/config", config)
+        # determine the configuration file directory
+        config_dir = self.config
+        if not os.path.exists(os.path.expandvars(os.path.expanduser(config_dir))):
+            config_dir = os.path.join("$NM_BASE/modules/NanoProd/NanoProd/crab", config_dir)
+        config_dir = law.LocalDirectoryTarget(config_dir)
 
-        data = law.LocalFileTarget(config).load(formatter="yaml")
+        # open and merge all configs
+        data = {}
+        for name in config_dir.listdir(pattern="*.yaml", type="f"):
+            # skip unused files
+            if name.startswith((".", "_")):
+                continue
+            data.update(config_dir.child(name, type="f").load(formatter="yaml"))
+
         # store global config and per dataset configs
         self.global_config = data["GLOBAL"]
         self.datasets_config = {name: cfg for name, cfg in data.items() if name != "GLOBAL"}
 
         # read the exclusion file
         self.exclude_data = {}
-        exclude_config = os.path.expandvars(os.path.expanduser(self.exclude_config))
-        if exclude_config not in ("", law.NO_STR):
-            if not os.path.exists(exclude_config):
-                exclude_config = os.path.join("$NM_BASE/modules/Framework/config", exclude_config)
-            if not os.path.exists(exclude_config):
-                raise Exception(f"exclude_config file '{exclude_config}' does not exist")
-            self.exclude_data = {
-                name: cfg
-                for name, cfg in law.LocalFileTarget(exclude_config).load(formatter="yaml").items()
-                if name != "GLOBAL"
-            }
+        # exclude_config = os.path.expandvars(os.path.expanduser(self.exclude_config))
+        # if exclude_config not in ("", law.NO_STR):
+        #     if not os.path.exists(exclude_config):
+        #         exclude_config = os.path.join("$NM_BASE/modules/Framework/config", exclude_config)
+        #     if not os.path.exists(exclude_config):
+        #         raise Exception(f"exclude_config file '{exclude_config}' does not exist")
+        #     self.exclude_data = {
+        #         name: cfg
+        #         for name, cfg in law.LocalFileTarget(exclude_config).load(formatter="yaml").items()
+        #         if name != "GLOBAL"
+        #     }
+
+    @property
+    def wlcg_fs_source(self):
+        gc = self.global_config
+        dc = self.dataset_config
+        return f"wlcg_fs_{gc['era']}_{gc['nanoVersion']}_{dc['remoteBase']}"
+
+    @property
+    def wlcg_fs_target(self):
+        gc = self.global_config
+        return f"wlcg_fs_{gc['era']}_{gc['nanoVersion']}"
+
+    def remote_target(self, *path):
+        return super().remote_target(*path, fs=self.wlcg_fs_source)
 
     def store_parts(self):
         return super().store_parts() + (os.path.splitext(os.path.basename(self.config))[0],)
