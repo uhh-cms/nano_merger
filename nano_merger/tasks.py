@@ -28,12 +28,14 @@ compression_ratios = {
 
 class CrabOutputUser(DatasetTask):
 
-    def iter_crab_outputs(self, **kwargs):
+    def get_crab_outputs(self, **kwargs):
         # define the base directory that is queried
         remote_dir = law.wlcg.WLCGDirectoryTarget(
             self.dataset_config["miniAOD"].split("/")[1],
             fs=self.wlcg_fs_source,
         )
+
+        outputs = []
 
         # loop through timestamps, corresponding to the normal and the recovery jobs
         assert self.dataset_config["timestamps"]
@@ -54,20 +56,24 @@ class CrabOutputUser(DatasetTask):
 
                 # loop through directory content and loop
                 for name in numbered_dir.listdir(**kwargs):
-                    yield numbered_dir.child(name, type=kwargs.get("type"))
+                    outputs.append(numbered_dir.child(name, type=kwargs.get("type")))
+
+        return outputs
 
 
 class UnpackFiles(CrabOutputUser):
 
     def output(self):
-        return self.local_target("mapping.json")
+        return self.remote_target("mapping.json")
 
     def run(self):
         # mapping from tar file name to contained root files
         contents = defaultdict(list)
 
-        # loop
-        for target in self.iter_crab_outputs(pattern="*.tar", type="f"):
+        # loop through crab outputs
+        crab_outputs = self.get_crab_outputs(pattern="*.tar", type="f")
+
+        def unpack_and_upload(target):
             # unpack into tmp dir
             tmp = law.LocalDirectoryTarget(is_tmp=True)
             tmp.touch()
@@ -80,6 +86,16 @@ class UnpackFiles(CrabOutputUser):
 
                 # upload
                 target.sibling(name, type="f").copy_from_local(tmp.child(name, type="f"))
+
+        def callback(i):
+            self.publish_message(f"handle file {i + 1} / {len(crab_outputs)}")
+
+        law.util.map_verbose(
+            unpack_and_upload,
+            crab_outputs,
+            every=5,
+            callback=callback,
+        )
 
         # save the file info
         self.output().dump(contents, indent=4, formatter="json")
@@ -96,7 +112,7 @@ class GatherFiles(CrabOutputUser):
     def run(self):
         # collect files
         files = []
-        for target in self.iter_crab_outputs(pattern="*.root", type="f"):
+        for target in self.get_crab_outputs(pattern="*.root", type="f"):
             files.append({
                 "path": target.path,
                 "size": target.stat().st_size,
