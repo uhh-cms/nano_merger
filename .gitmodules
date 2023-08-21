@@ -1,0 +1,3 @@
+[submodule "modules/NanoProd"]
+    path = modules/NanoProd
+    url = ../NanoProd.git
