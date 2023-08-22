@@ -68,6 +68,9 @@ class ConfigTask(Task):
 
         # read the exclusion file
         self.exclude_data = {}
+
+
+
         # exclude_config = os.path.expandvars(os.path.expanduser(self.exclude_config))
         # if exclude_config not in ("", law.NO_STR):
         #     if not os.path.exists(exclude_config):
@@ -111,8 +114,8 @@ class DatasetTask(ConfigTask):
         # load the dataset config
         self.dataset_config = self.datasets_config[self.dataset]
 
-        # load excluded lfns
-        self.exclude_lfns = set(self.exclude_data.get(self.dataset, {}).get("miniAOD_ignoreFiles", []))
+        # extract excluded lfns, if not exist use empty tuple to enable "if in check"
+        self.exclude_lfns = set(self.dataset_config.get("ignore_miniAOD_LFNs", ()))
 
     def store_parts(self):
         return super().store_parts() + (self.dataset,)
@@ -138,6 +141,7 @@ class DatasetTask(ConfigTask):
         n_events = []
         for dbs_info in json.loads(out.strip()):
             dbs_file = dbs_info["file"][0]
+            # add event to count if valid and not excluded
             if dbs_file["is_file_valid"] and dbs_file["name"] not in self.exclude_lfns:
                 n_events.append(dbs_file["nevents"])
             dataset_id = dbs_file["dataset_id"]
