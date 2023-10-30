@@ -10,7 +10,7 @@ bootstrap_htcondor_standalone() {
     export NM_ON_HTCONDOR="1"
     export NM_REMOTE_JOB="1"
     export NM_BASE="{{nm_base}}"
-    export X509_USER_PROXY="${PWD}/{{voms_proxy_file}}"
+    [ ! -z "{{vomsproxy_file}}" ] && export X509_USER_PROXY="${PWD}/{{vomsproxy_file}}"
 
     # source the default repo setup
     source "${NM_BASE}/setup.sh" "" || return "$?"

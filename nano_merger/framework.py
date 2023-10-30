@@ -39,12 +39,6 @@ class ConfigTask(Task):
         "$NM_BASE/modules/NanoProd/NanoProd/crab; default: Run2_2016_uhh",
     )
 
-    # exclude_config = luigi.Parameter(
-    #     default=law.NO_STR,
-    #     description="external yaml file used to exclude certain lfns; resolved relative to "
-    #     "$NM_BASE/modules/Framework/config; default: empty",
-    # )
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -68,20 +62,6 @@ class ConfigTask(Task):
 
         # read the exclusion file
         self.exclude_data = {}
-
-
-
-        # exclude_config = os.path.expandvars(os.path.expanduser(self.exclude_config))
-        # if exclude_config not in ("", law.NO_STR):
-        #     if not os.path.exists(exclude_config):
-        #         exclude_config = os.path.join("$NM_BASE/modules/Framework/config", exclude_config)
-        #     if not os.path.exists(exclude_config):
-        #         raise Exception(f"exclude_config file '{exclude_config}' does not exist")
-        #     self.exclude_data = {
-        #         name: cfg
-        #         for name, cfg in law.LocalFileTarget(exclude_config).load(formatter="yaml").items()
-        #         if name != "GLOBAL"
-        #     }
 
     @property
     def wlcg_fs_source(self):
@@ -216,12 +196,11 @@ class HTCondorWorkflow(law.htcondor.HTCondorWorkflow):
         )
 
     def htcondor_job_config(self, config, job_num, branches):
-        # include the voms proxy
-        voms_proxy_file = law.wlcg.get_voms_proxy_file()
-        if not law.wlcg.check_voms_proxy_validity(proxy_file=voms_proxy_file):
+        vomsproxy_file = law.wlcg.get_vomsproxy_file()
+        if not law.wlcg.check_vomsproxy_validity(proxy_file=vomsproxy_file):
             raise Exception("voms proxy not valid, submission aborted")
-        config.input_files["voms_proxy_file"] = law.JobInputFile(
-            voms_proxy_file,
+        config.input_files["vomsproxy_file"] = law.JobInputFile(
+            vomsproxy_file,
             share=True,
             render=False,
         )
