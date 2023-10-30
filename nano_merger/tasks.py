@@ -300,7 +300,8 @@ class MergeFiles(DatasetTask, law.LocalWorkflow, HTCondorWorkflow):
         return f"{postfix1}_{postfix2}" if postfix1 else postfix2
 
     def htcondor_destination_info(self, info):
-        return info + [self.dataset]
+        info["dataset"] = self.dataset
+        return info
 
 
 class MergeFilesWrapper(DatasetWrapperTask):
