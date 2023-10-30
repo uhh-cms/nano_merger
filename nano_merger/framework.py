@@ -75,7 +75,7 @@ class ConfigTask(Task):
         return f"wlcg_fs_{gc['era']}_{gc['nanoVersion']}"
 
     def remote_target(self, *path):
-        return super().remote_target(*path, fs=self.wlcg_fs_source)
+        return super().remote_target(*path, fs=self.wlcg_fs_target)
 
     def store_parts(self):
         return super().store_parts() + (os.path.splitext(os.path.basename(self.config))[0],)
