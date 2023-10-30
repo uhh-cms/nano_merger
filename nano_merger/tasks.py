@@ -174,18 +174,14 @@ class MergeFiles(DatasetTask, law.LocalWorkflow, HTCondorWorkflow):
 
     target_size = ComputeMergingFactor.target_size
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # don't cache by default, but only if requirements exist
-        self._cache_branches = False
+    cache_branch_map_default = False
 
     def create_branch_map(self):
         reqs = self.workflow_requires()
         if not reqs["factor"].complete():
             return [None]
 
-        self._cache_branches = True
+        self._cache_branch_map = True
         n_files = len(reqs["files"].output().load(formatter="json"))
         merging_factor = reqs["factor"].output().load(formatter="json")["merging_factor"]
 
