@@ -174,18 +174,14 @@ class MergeFiles(DatasetTask, law.LocalWorkflow, HTCondorWorkflow):
 
     target_size = ComputeMergingFactor.target_size
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # don't cache by default, but only if requirements exist
-        self._cache_branches = False
+    cache_branch_map_default = False
 
     def create_branch_map(self):
         reqs = self.workflow_requires()
         if not reqs["factor"].complete():
             return [None]
 
-        self._cache_branches = True
+        self._cache_branch_map = True
         n_files = len(reqs["files"].output().load(formatter="json"))
         merging_factor = reqs["factor"].output().load(formatter="json")["merging_factor"]
 
@@ -220,6 +216,7 @@ class MergeFiles(DatasetTask, law.LocalWorkflow, HTCondorWorkflow):
             for i, f in enumerate(self.input()["files"].load(formatter="json"))
             if i in self.branch_data
         ]
+
 
         # default cwd
         cwd = law.LocalDirectoryTarget(is_tmp=True)
@@ -380,13 +377,20 @@ class CreateEntry(DatasetTask):
     target_size = ComputeMergingFactor.target_size
 
     def requires(self):
-        return MergeFiles.req(self)
+        return {
+        "factor": ComputeMergingFactor.req(self),
+        "merged_files": MergeFiles.req(self),
+        }
 
     def output(self):
         return self.local_target(f"entry_{self.target_size}MB.txt")
 
     def run(self):
-        col = self.input()["collection"]
+        inputs = self.input()
+
+        merging_factor = inputs["factor"]
+        col = inputs["merged_files"]["collection"]
+
 
         # get the number of files and events
         n_files = len(col)
@@ -397,6 +401,7 @@ class CreateEntry(DatasetTask):
 
         # get das info
         das_info = self.get_das_info()
+
 
         # compare number of events
         if n_events != das_info["n_events"]:
@@ -418,8 +423,11 @@ class CreateEntry(DatasetTask):
         # extra information
         is_data_extra = ""
         aux_extra = ""
+
+
+
         if self.dataset_config["sampleType"] == "data":
-            era = re.match(r"^.+_Run\d{4}([^-]+)-.+$", self.dataset).group(1)
+            era = re.match(r"^.+_Run\d{4}([^-]+).*$", self.dataset).group(1)
             is_data_extra = """
     is_data=True,"""
             aux_extra = f"""
