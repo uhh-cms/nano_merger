@@ -28,12 +28,17 @@ compression_ratios = {
 
 class CrabOutputUser(DatasetTask):
 
-    def get_crab_outputs(self, **kwargs):
-        # define the base directory that is queried
-        remote_dir = law.wlcg.WLCGDirectoryTarget(
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # define the remote directory
+        self.remote_dir = law.wlcg.WLCGDirectoryTarget(
             self.dataset_config["miniAOD"].split("/")[1],
             fs=self.wlcg_fs_source,
         )
+
+    def get_crab_outputs(self, **kwargs):
+        # define the base directory that is queried
 
         outputs = []
 
@@ -48,32 +53,90 @@ class CrabOutputUser(DatasetTask):
             submission_dir = f"crab_{self.dataset}"
             if recovery_index:
                 submission_dir = f"{submission_dir}_recovery_{recovery_index}"
-            timestamp_dir = remote_dir.child(os.path.join(submission_dir, timestamp), type="d")
+            timestamp_dir = self.remote_dir.child(os.path.join(submission_dir, timestamp), type="d")
 
             # loop through numbered directories
+            # numbers = timestamp_dir.listdir(pattern="0*", type="d")
+            # def get_outputs(num):
             for num in timestamp_dir.listdir(pattern="0*", type="d"):
+
                 numbered_dir = timestamp_dir.child(num, type="d")
 
                 # loop through directory content and loop
                 for name in numbered_dir.listdir(**kwargs):
                     outputs.append(numbered_dir.child(name, type=kwargs.get("type")))
+            # def callback(i):
+            #     self.publish_message(f"handle dir {i + 1} / {len(numbers)}")
 
+        # law.util.map_verbose(
+        #     get_outputs,
+        #     numbers,
+        #     every=1,
+        #     callback=callback,
+        # )
+        # return sorted(outputs, key=lambda x: x.path)
         return outputs
 
-
-class UnpackFiles(CrabOutputUser):
+class GatherCrabOutputs(CrabOutputUser):
 
     def output(self):
-        return self.remote_target("mapping.json")
+        return self.remote_target("outputs.json")
+    
+    def run(self):
+        # collect files
+        outputs = [x.path for x in self.get_crab_outputs(pattern="*.tar", type="f")]
+
+        # save the file info
+        self.output().dump(sorted(outputs), indent=4, formatter="json")
+
+class UnpackFiles(CrabOutputUser, law.LocalWorkflow, HTCondorWorkflow):
+
+    cache_branch_map_default = False
+
+    @law.dynamic_workflow_condition
+    def workflow_condition(self):
+        # declare that the branch map can be built if the workflow requirement exists
+        # note: self.input() refers to the outputs of tasks defined in workflow_requires()
+        return self.input()["outputs"].exists()
+
+    def workflow_requires(self):
+        reqs = super().workflow_requires()
+        reqs.update({
+            "outputs": GatherCrabOutputs.req(self),
+        })
+        return reqs
+
+    def requires(self):
+        return {
+            "outputs": GatherCrabOutputs.req(self),
+        }
+
+    @workflow_condition.create_branch_map
+    def create_branch_map(self):
+        # reqs = self.workflow_requires()
+        # if not reqs["outputs"].complete():
+        #     return [None]
+
+        self._cache_branch_map = True
+        all_craboutputs = self.input()["outputs"].load(formatter="json")
+
+        return list(law.util.iter_chunks(all_craboutputs, 20))
+    
+    @workflow_condition.output
+    def output(self):
+        return self.remote_target(f"mapping_{self.branch}.json")
 
     def run(self):
         # mapping from tar file name to contained root files
         contents = defaultdict(list)
 
         # loop through crab outputs
-        crab_outputs = self.get_crab_outputs(pattern="*.tar", type="f")
+        # crab_outputs = self.get_crab_outputs(pattern="*.tar", type="f")
+        crab_outputs = self.branch_map[self.branch]
 
         def unpack_and_upload(target):
+            if not isinstance(target, law.wlcg.WLCGFileTarget):
+                target = self.remote_dir.child(target, type="f")
             # unpack into tmp dir
             tmp = law.LocalDirectoryTarget(is_tmp=True)
             tmp.touch()
@@ -84,8 +147,18 @@ class UnpackFiles(CrabOutputUser):
                 # fill mapping
                 contents[target.basename].append(name)
 
-                # upload
-                target.sibling(name, type="f").copy_from_local(tmp.child(name, type="f"))
+                try:
+                    # upload
+                    output_at_target = target.sibling(name, type="f")
+                    output_at_target.copy_from_local(tmp.child(name, type="f"))
+                    self.publish_message(f"uploaded {output_at_target.path} with {target.stat().st_size} bytes")
+                    
+                    if not output_at_target.exists():
+                        raise Exception(f"upload failed for {output_at_target.path}")
+
+                except Exception as e:
+                    print(e)
+
 
         def callback(i):
             self.publish_message(f"handle file {i + 1} / {len(crab_outputs)}")
@@ -93,18 +166,36 @@ class UnpackFiles(CrabOutputUser):
         law.util.map_verbose(
             unpack_and_upload,
             crab_outputs,
-            every=5,
+            every=1,
             callback=callback,
         )
 
         # save the file info
         self.output().dump(contents, indent=4, formatter="json")
+    
 
+    def htcondor_output_postfix(self):
+        postfix1 = super().htcondor_output_postfix()
+        postfix2 = "unpacking"
+        return f"{postfix1}_{postfix2}" if postfix1 else postfix2
+
+    def htcondor_destination_info(self, info):
+        info["dataset"] = self.dataset
+        return info
 
 class GatherFiles(CrabOutputUser):
 
+    def workflow_requires(self):
+        reqs = super().workflow_requires()
+        reqs.update({
+            "unpack": UnpackFiles.req(self),
+        })
+        return reqs
+
     def requires(self):
-        return UnpackFiles.req(self)
+        return {
+            "unpack": UnpackFiles.req(self),
+        }
 
     def output(self):
         return self.remote_target("files.json")
@@ -120,6 +211,49 @@ class GatherFiles(CrabOutputUser):
             })
 
         # save the file info
+        self.output().dump(files, indent=4, formatter="json")
+
+class TestGatherFiles(GatherFiles):
+
+    def workflow_requires(self):
+        reqs = super().workflow_requires()
+        reqs.update({
+            "unpack": UnpackFiles.req(self),
+            "crab_outputs": GatherCrabOutputs.req(self),
+        })
+        return reqs
+
+    def requires(self):
+        return {
+            "unpack": UnpackFiles.req(self),
+            "crab_outputs": GatherCrabOutputs.req(self),
+        }
+    
+    def run(self):
+
+        unpacked_file_mappings = list(self.input()["unpack"].collection.targets.values())
+        crab_outputs = self.input()["crab_outputs"].load(formatter="json")
+        
+        # first merge all mappings for easier lookup
+        all_mappings = dict()
+        for mapping in unpacked_file_mappings:
+            all_mappings.update(mapping.load(formatter="json"))
+        
+        # now loop through crab outputs and load unpacked files from mappings
+        files = []
+        for output in crab_outputs:
+            this_dir = os.path.dirname(output)
+            this_base = os.path.basename(output)
+            for x in all_mappings[this_base]:
+                tmp = os.path.join(this_dir, x)
+                target = self.remote_dir.child(tmp, type="f")
+                files.append({
+                    "path": target.path,
+                    "size": target.stat().st_size,
+                    "remote_base": self.dataset_config["remoteBase"],
+                })
+        
+        self.publish_message(f"extracted {len(files)} files from mappings")
         self.output().dump(files, indent=4, formatter="json")
 
 
@@ -315,7 +449,7 @@ class MergeFilesWrapper(DatasetWrapperTask):
 class ValidateEvents(DatasetTask):
 
     def requires(self):
-        return GatherFiles.req(self)
+        return TestGatherFiles.req(self)
 
     def output(self):
         return self.local_target("stats.json")
@@ -334,12 +468,15 @@ class ValidateEvents(DatasetTask):
         ]
 
         # open all files and extract the number of events
-        law.contrib.load("root")
+        foo = law.contrib.load("root")
+        ROOT = foo.import_ROOT()
         progress = self.create_progress_callback(len(paths))
         n_events = []
         with self.publish_step(f"opening {len(paths)} files ..."):
             for i, path in enumerate(paths, start=1):
                 with law.LocalFileTarget(path).load(formatter="root") as tfile:
+                    if not all((tfile.IsOpen(), not tfile.IsZombie(), not tfile.TestBit(ROOT.TFile.kRecovered))):
+                        raise Exception(f"file {path} is not open or zombie or recovered")
                     tree = tfile.Get("Events")
                     _n_events = int(tree.GetEntries()) if tree else 0
                 n_events.append(_n_events)
