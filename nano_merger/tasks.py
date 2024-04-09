@@ -159,7 +159,6 @@ class UnpackFiles(CrabOutputUser, law.LocalWorkflow, HTCondorWorkflow):
                 except Exception as e:
                     print(e)
 
-
         def callback(i):
             self.publish_message(f"handle file {i + 1} / {len(crab_outputs)}")
 
@@ -173,7 +172,6 @@ class UnpackFiles(CrabOutputUser, law.LocalWorkflow, HTCondorWorkflow):
         # save the file info
         self.output().dump(contents, indent=4, formatter="json")
     
-
     def htcondor_output_postfix(self):
         postfix1 = super().htcondor_output_postfix()
         postfix2 = "unpacking"
@@ -182,6 +180,176 @@ class UnpackFiles(CrabOutputUser, law.LocalWorkflow, HTCondorWorkflow):
     def htcondor_destination_info(self, info):
         info["dataset"] = self.dataset
         return info
+
+
+class CheckJobOutputs(CrabOutputUser, law.LocalWorkflow, HTCondorWorkflow):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._dbs_interface = None
+
+    crab_log_dir = law.Parameter(
+        description="directory with crab log files; resolved relative to "
+        "$NM_BASE",
+        # type=str,
+    )
+
+    def create_branch_map(self):
+        return [self.crab_log_dir]
+
+    # @law.dynamic_workflow_condition
+    # def workflow_condition(self):
+    #     # declare that the branch map can be built if the workflow requirement exists
+    #     # note: self.input() refers to the outputs of tasks defined in workflow_requires()
+    #     return self.input()["outputs"].exists()
+
+    def workflow_requires(self):
+        reqs = super().workflow_requires()
+        reqs.update({
+            "crab_outputs": GatherCrabOutputs.req(self),
+            "unpacked_mappings": UnpackFiles.req(self, _exclude={"branches"}),
+        })
+        return reqs
+
+    def requires(self):
+        return {
+            "crab_outputs": GatherCrabOutputs.req(self),
+            "unpacked_mappings": UnpackFiles.req(self, _exclude={"branch"}),
+        }
+
+    @property
+    def dbs_interface(self):
+        if not self._dbs_interface:
+            import sys
+            nano_prod_path = os.path.expandvars(os.path.join("$NM_BASE", "modules", "NanoProd"))
+            if nano_prod_path not in sys.path:
+                sys.path.append(nano_prod_path)
+
+            import wlcg_dbs_interface as dbs_helper
+            self._dbs_interface = dbs_helper.WLCGInterface()
+        return self._dbs_interface
+
+    # @workflow_condition.output
+    def output(self):
+        return {
+            "completion": self.remote_target("check_complete.txt"),
+            "not_unpacked": self.remote_target("not_unpacked_ids.json"),
+            "broken": self.remote_target("broken_files.json"),
+        }
+
+    def run(self):
+        # from IPython import embed
+        # embed()
+        crab_log_dir = self.branch_map[self.branch]
+        
+        log_dir_base = law.LocalDirectoryTarget(os.path.join("$NM_BASE", crab_log_dir, self.dataset))
+        if not log_dir_base.exists():
+            raise Exception(f"crab log directory {log_dir_base.abspath} does not exist")
+
+        crab_outputs = self.input()["crab_outputs"].load(formatter="json")
+        # this will need some rethinking if there is actually more than one timestamp
+        unpacked_file_mappings = list(self.input()["unpacked_mappings"].collection.targets.values())
+        # first merge all mappings for easier lookup
+        all_mappings = dict()
+        for mapping in unpacked_file_mappings:
+            all_mappings.update(mapping.load(formatter="json"))
+
+        # get complete list of lfns from interface
+        valid_files = self.dbs_interface.load_valid_file_list(self.dataset_config["miniAOD"])
+
+        foo = law.contrib.load("root")
+        ROOT = foo.import_ROOT()
+        broken_files = defaultdict(dict)
+        for recovery_index, timestamp in enumerate(self.dataset_config["timestamps"]):
+            if not timestamp:
+                continue
+            submission_dir = f"crab_{self.dataset}"
+            if recovery_index:
+                submission_dir = f"{submission_dir}_recovery_{recovery_index}"
+            local_log_dir = log_dir_base.child(os.path.join(submission_dir, "local"), type="d")
+
+            if not local_log_dir.exists():
+                raise Exception(f"local log directory {local_log_dir.abspath} does not exist")
+
+            crab_mapping_file = local_log_dir.child("job_input_files.json", type="f")
+            crab_mapping = crab_mapping_file.load(formatter="json")
+
+            # check whether all outputs were unpacked (needs to be updated to account for different timestamps)
+            unpacked_job_ids = set(int(re.match(r".*_(\d+).tar", file_name).group(1)) for file_name in all_mappings.keys())
+            crab_job_ids = set([int(x) for x in crab_mapping.keys()])
+            not_unpacked_ids = crab_job_ids.symmetric_difference(unpacked_job_ids)
+
+            if len(not_unpacked_ids) > 0:
+                # self.publish_message(f"found {len(not_unpacked_ids)} job ids that were not unpacked")
+                self.output()["not_unpacked"].dump(list(not_unpacked_ids), indent=4, formatter="json")
+                raise Exception(f"found {len(not_unpacked_ids)} job ids that were not unpacked")
+
+            # filter crab outputs for this timestamp
+            timestamp_outputs = list(filter(lambda x: timestamp in x, crab_outputs))
+
+            self.publish_message(f"found {len(timestamp_outputs)} crab outputs for timestamp {timestamp}")
+
+            # loop through crab outputs and load unpacked files from mappings
+            # for crab_output in timestamp_outputs:
+            def compare_counts_per_lfn(crab_output):
+                # get the corresponding tar file
+                base_dir = os.path.dirname(crab_output)
+                file_name = os.path.basename(crab_output)
+                processed_events = 0
+                for x in all_mappings[file_name]:
+                    tmp = os.path.join(base_dir, x)
+                    target = self.remote_dir.child(tmp, type="f")
+                    with target.load(formatter="root") as tfile:
+                        if not all((tfile.IsOpen(), not tfile.IsZombie(), not tfile.TestBit(ROOT.TFile.kRecovered))):
+                            raise Exception(f"file {target.abspath} is not open or zombie or recovered")
+                        tree = tfile.Get("Events")
+                        processed_events += int(tree.GetEntries()) if tree else 0
+
+                job_id = int(re.match(r".*_(\d+).tar", file_name).group(1))
+
+                these_lfns = crab_mapping[str(job_id)]
+                if any("logical_file_name" in x.keys() for x in valid_files):
+                    # access keys if information is obtained from dbs api
+                    lfn_key = "logical_file_name"
+                    count_key = "event_count"
+                else:
+                    # access keys if information is obtained from dasgoclient
+                    lfn_key = "name"
+                    count_key = "nevents"
+                lfns_info = list(filter(lambda x: x[lfn_key] in these_lfns, valid_files))
+
+                original_count = sum([x[count_key] for x in lfns_info])
+
+                if not processed_events == original_count:
+                    self.publish_message(f"job {job_id} has {processed_events} events, but should have {original_count}")
+                    broken_files[timestamp].update({job_id: {
+                        "processed": processed_events,
+                        "original": original_count,
+                        "lfns": these_lfns,
+                    }})
+
+            def callback(i):
+                self.publish_message(f"handle file {i + 1} / {len(timestamp_outputs)}")
+
+            law.util.map_verbose(
+                compare_counts_per_lfn,
+                timestamp_outputs,
+                every=5,
+                callback=callback,
+            )
+
+        if len(broken_files) > 0:
+            broken_output = self.output()["broken"]
+            broken_output.dump(broken_files, indent=4, formatter="json")
+            self.publish_message(f"saved broken files to {broken_output.abspath}")
+
+            raise Exception(f"found {len(broken_files)} broken jobs")
+
+        # if we end up here, everything worked, so touch all files
+        for key in self.output().keys():
+
+            self.output()[key].touch()
+
 
 class GatherFiles(CrabOutputUser):
 
