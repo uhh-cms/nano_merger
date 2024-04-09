@@ -180,7 +180,14 @@ class HTCondorWorkflow(law.htcondor.HTCondorWorkflow):
         "naf,cern; default: naf",
     )
 
-    exclude_params_branch = {"max_runtime", "htcondor_flavor"}
+    htcondor_os = luigi.ChoiceParameter(
+        default="CentOS7",
+        choices=("CentOS7", "CentOS8", "AlmaLinux9", "RedHat9"),
+        significant=False,
+        description="Operating system to request for remote worker. Default: CentOS7",
+    )
+
+    exclude_params_branch = {"max_runtime", "htcondor_flavor", "htcondor_os"}
 
     def htcondor_output_directory(self):
         # the directory where submission meta data and logs should be stored
@@ -211,11 +218,13 @@ class HTCondorWorkflow(law.htcondor.HTCondorWorkflow):
 
         # use cc7 at CERN (https://batchdocs.web.cern.ch/local/submit.html)
         if self.htcondor_flavor == "cern":
-            config.custom_content.append(("requirements", '(OpSysAndVer =?= "CentOS7")'))
+            config.custom_content.append(("requirements", f'(OpSysAndVer =?= "{self.htcondor_os}")'))
 
         # same on naf with case insensitive comparison (https://confluence.desy.de/display/IS/BIRD)
         if self.htcondor_flavor == "naf":
-            config.custom_content.append(("requirements", '(OpSysAndVer == "CentOS7")'))
+            if self.htcondor_os == "AlmaLinux9":
+                raise ValueError("AlmaLinux9 is not supported on NAF, use RedHat9 instead")
+            config.custom_content.append(("requirements", f'Request_OpSysAndVer = "{self.htcondor_os}"'))
 
         # max runtime
         max_runtime = int(math.floor(self.max_runtime * 3600)) - 1
